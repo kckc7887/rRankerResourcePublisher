@@ -46,6 +46,7 @@ def normalize(game, legacy, assets, output, catalog=None):
                 entry["name"] = logical
         files.append(entry)
     if game == "rizline":
+        files = list({item["path"]: item for item in files}.values())
         catalog = copy.deepcopy(catalog)
         for song in catalog["songs"]:
             if song["coverPath"]:

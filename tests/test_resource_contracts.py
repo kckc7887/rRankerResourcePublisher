@@ -27,9 +27,10 @@ class ResourceContracts(unittest.TestCase):
     def test_rizline_migration_uploads_only_rewritten_catalog(self):
         prefix = "rizline/releases/2026-09-20-2/"
         chart, audio, cover = prefix + "charts/old.json", prefix + "audio/old.m4a", prefix + "covers/old.png"
+        repeated_chart = prefix + "charts/same-content.json"
         catalog = {"schemaVersion": 1, "gameVersion": "2.7.1", "resourceVersion": "date", "songs": [
-            {"id": "Song.A", "coverPath": cover, "audioPath": audio, "charts": [{"chartPath": chart}]}]}
-        payloads = {chart: b"chart", audio: b"audio", cover: b"cover", prefix + "catalog.json": encode(catalog)}
+            {"id": "Song.A", "coverPath": cover, "audioPath": audio, "charts": [{"chartPath": chart}, {"chartPath": repeated_chart}]}]}
+        payloads = {chart: b"chart", repeated_chart: b"chart", audio: b"audio", cover: b"cover", prefix + "catalog.json": encode(catalog)}
         files = [{"path": key, "size": len(data), "sha256": digest(data)} for key, data in payloads.items()]
         for key, data in payloads.items():
             self.s3.seed(key, data)
@@ -47,6 +48,8 @@ class ResourceContracts(unittest.TestCase):
         song = body["songs"][0]
         self.assertEqual(self.s3.objects[song["audioPath"]]["Body"], b"audio")
         self.assertEqual(self.s3.objects[song["charts"][0]["chartPath"]]["Body"], b"chart")
+        self.assertEqual(song["charts"][0]["chartPath"], song["charts"][1]["chartPath"])
+        self.assertEqual(len(candidate["manifest"]["files"]), 4)
         self.assertTrue(song["coverPath"].startswith("rizline/covers/"))
         for key, row in old.items():
             self.assertEqual(self.s3.objects[key], row)
