@@ -180,7 +180,7 @@ class ExtractionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'chart.json'):
                 self.resource.write_resource(('chart.json', b'chart'))
 
-    def test_music_variants_keep_distinct_output_names(self):
+    def test_chart_variants_share_default_music(self):
         obj = Mock()
         entry = Mock()
         entry.get_filtered_objects.side_effect = lambda _: iter([Mock(read=lambda: obj)])
@@ -190,7 +190,7 @@ class ExtractionTests(unittest.TestCase):
                                {'music': 'music'}, dict(avatar=False, chart=False, illustrationBlur=False,
                                illustrationLowRes=False, illustration=False, music=True))
         self.assertEqual([Path(call.args[1]).name for call in pool.submit.call_args_list],
-                         ['Random.SobremSilentroom.ogg', 'Random.SobremSilentroom.1.ogg', 'Random.SobremSilentroom.6.ogg'])
+                         ['Random.SobremSilentroom.ogg'])
 
 
 if __name__ == '__main__':

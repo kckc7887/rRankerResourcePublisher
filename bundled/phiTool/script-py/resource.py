@@ -21,7 +21,6 @@ import gc
 from io import BytesIO
 import json
 import os
-import re
 import shutil
 import sys
 import time
@@ -211,10 +210,8 @@ def save(key, entry, pool, logger, output_dirs, config):
     elif config["illustration"] and key[-19:-3] == ".0/Illustration.":
         key = key[:-19]
         pool.submit(save_image, os.path.join(output_dirs["illustration"], "%s.png" % key), obj.image)
-    elif config["music"] and re.search(r"\.\d+/music\.wav$", key):
-        key = key[:-10]
-        if key.endswith('.0'):
-            key = key[:-2]
+    elif config["music"] and key.endswith(".0/music.wav"):
+        key = key[:-12]
         pool.submit(save_music, os.path.join(output_dirs["music"], "%s.ogg" % key), obj)
         # save_music(f"music/{key}.wav", obj)
 

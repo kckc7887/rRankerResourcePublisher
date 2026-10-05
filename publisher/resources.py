@@ -4,8 +4,9 @@ import copy
 import json
 import mimetypes
 from pathlib import Path
+import re
 
-from .storage import Storage, digest, encode, file_digest, object_key, safe_path
+from .storage import Storage, digest, encode, file_digest, object_key, parallel, safe_path
 
 KYOU_TABLES = ("songs", "aliases", "charts", "tag_votes", "tag_catalog")
 KYOU_FILES = tuple(f"{name}.{extension}" for name in KYOU_TABLES for extension in ("json", "csv")) + ("data.json",)
@@ -40,6 +41,8 @@ def normalize(game, legacy, assets, output, catalog=None):
         entry = {name: item[name] for name in ("size", "sha256", "contentType")}
         if game == "phigros":
             entry.update(path=logical, objectKey=key)
+            if "contentSha256" in asset:
+                entry["contentSha256"] = asset["contentSha256"]
         else:
             entry["path"] = key
             if game == "kyou":
@@ -116,7 +119,41 @@ def local_candidate(game, root, output):
             continue
         assets.append({**item, "logical": logical, "original": original, "local": str(path)})
     catalog = json.loads((root / manifest["catalogPath"]).read_text(encoding="utf-8")) if game == "rizline" else None
+    if game == "phigros":
+        from .publication import read_release
+        storage = Storage(game)
+        baseline = read_release(storage, game)
+        reuse_media(assets, storage, baseline["manifest"])
     return normalize(game, manifest, assets, output, catalog)
+
+
+def reuse_media(assets, storage, manifest):
+    from .media import content_digest
+    previous = {item["path"]: item for item in manifest["assets"]}
+    def reuse(asset):
+        extension = Path(asset["logical"]).suffix.lower()
+        if extension not in (".png", ".ogg"):
+            return
+        old = previous.get(asset["logical"])
+        fingerprint = old.get("contentSha256") if old else None
+        if fingerprint is not None and (not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)):
+            raise ValueError("Invalid baseline media fingerprint")
+        if old and old["sha256"] == asset["sha256"] and fingerprint:
+            asset["contentSha256"] = fingerprint
+            return
+        current = content_digest(Path(asset["local"]).read_bytes(), extension)
+        asset["contentSha256"] = current
+        if old and fingerprint is None:
+            if old["sha256"] == asset["sha256"]:
+                fingerprint = current
+            else:
+                data, _ = storage.get(old["objectKey"])
+                if len(data) != old["size"] or digest(data) != old["sha256"]:
+                    raise ValueError(f"Baseline media corrupted: {asset['logical']}")
+                fingerprint = content_digest(data, extension)
+        if fingerprint == current:
+            asset.update(sha256=old["sha256"], size=old["size"], contentType=old["contentType"])
+    parallel(reuse, assets)
 
 
 def migration_candidate(game, output):
