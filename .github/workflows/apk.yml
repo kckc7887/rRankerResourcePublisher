@@ -1,0 +1,54 @@
+name: Publish formal Release APKs
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: rRanker 正式 Release ID
+        type: string
+        required: true
+      bootstrap:
+        description: 从已有 0.3.0 对象桶内复制
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: rranker-release-apks
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: S3_BUCKET_RRANKER
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python -m pip install 'boto3>=1.40,<2' 'requests>=2.32,<3'
+      - name: Verify all APKs and publish fixed addresses
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+          GH_TOKEN: ${{ github.token }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          args=()
+          if [ "$BOOTSTRAP" = true ]; then
+            python -m publisher.storage_check apk
+            args+=(--bootstrap)
+          fi
+          python -m publisher.apk "$RELEASE_ID" "${args[@]}" --execute
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: apk-publication-${{ github.run_attempt }}
+          path: work/apk/report.json
+          if-no-files-found: warn
+          retention-days: 90

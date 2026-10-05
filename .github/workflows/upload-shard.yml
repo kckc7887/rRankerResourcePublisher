@@ -1,0 +1,53 @@
+name: Upload resource shard
+on:
+  workflow_call:
+    inputs:
+      game:
+        type: string
+        required: true
+      environment:
+        type: string
+        required: true
+      shard:
+        type: number
+        required: true
+      attempt:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python -m pip install 'boto3>=1.40,<2'
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.game }}-plan-${{ inputs.attempt }}
+          path: work/publication
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.game }}-shard-${{ inputs.shard }}-${{ inputs.attempt }}
+          path: work/payload
+      - run: python -m publisher shard --plan work/publication/plan.json --shard "$SHARD" --payload work/payload --receipt "work/receipts/receipt-$SHARD.json"
+        env:
+          SHARD: ${{ inputs.shard }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.game }}-receipt-${{ inputs.shard }}-${{ inputs.attempt }}
+          overwrite: true
+          path: work/receipts/receipt-*.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,225 @@
+name: Prepare and publish resources
+on:
+  workflow_call:
+    inputs:
+      game:
+        type: string
+        required: true
+      environment:
+        type: string
+        required: true
+      execute:
+        type: boolean
+        required: true
+      migrate:
+        type: boolean
+        required: true
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONUNBUFFERED: '1'
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 150
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      shards: ${{ steps.plan.outputs.shards }}
+      attempt: ${{ steps.plan.outputs.attempt }}
+    env:
+      GAME: ${{ inputs.game }}
+      S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+      S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check publication branch
+        if: inputs.execute && github.ref != 'refs/heads/master'
+        run: exit 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Verify storage conditions for migration
+        if: inputs.execute && inputs.migrate
+        run: python -m publisher.storage_check "$GAME"
+      - name: Install media tools
+        if: ${{ !inputs.migrate && inputs.game != 'kyou' }}
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libogg0 libvorbis0a libvorbisenc2
+      - name: Install vgmstream
+        if: ${{ !inputs.migrate && inputs.game == 'rizline' }}
+        run: |
+          curl -fsSL -o /tmp/vgmstream.zip https://github.com/vgmstream/vgmstream/releases/download/r2117/vgmstream-linux.zip
+          echo '2f98c77f756079f63fbd119939067f1ed461d77e70993bc4cc372736d859c84a  /tmp/vgmstream.zip' | sha256sum -c
+          mkdir -p /tmp/vgmstream
+          unzip -qo /tmp/vgmstream.zip -d /tmp/vgmstream
+          cli="$(find /tmp/vgmstream -type f -name vgmstream-cli -print -quit)"
+          test -n "$cli"
+          sudo install -m 755 "$cli" /usr/local/bin/vgmstream-cli
+      - name: Restore Rizline caches
+        if: ${{ !inputs.migrate && inputs.game == 'rizline' }}
+        uses: actions/cache@v5
+        with:
+          path: .cache
+          key: rizline-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: rizline-v1-${{ runner.os }}-
+      - name: Install crawler browser
+        if: ${{ !inputs.migrate && inputs.game == 'kyou' }}
+        run: python -m playwright install --with-deps chromium
+      - name: Parse upstream resources
+        if: ${{ !inputs.migrate && inputs.game != 'kyou' }}
+        run: python -m publisher build "$GAME" --output work/build
+      - name: Crawl Kyou
+        if: ${{ !inputs.migrate && inputs.game == 'kyou' }}
+        run: xvfb-run -a python -m publisher build kyou --output work/build
+      - name: Prepare delta or migration plan
+        id: plan
+        env:
+          MIGRATE: ${{ inputs.migrate }}
+        run: |
+          if [ "$MIGRATE" = true ]; then
+            python -m publisher migrate "$GAME" --output work/publication
+          else
+            python -m publisher prepare "$GAME" --input work/build --output work/publication
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.game }}-plan-${{ github.run_attempt }}
+          path: work/publication/plan.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish Kyou
+        if: inputs.execute && inputs.game == 'kyou'
+        run: |
+          python -m publisher publish-plan --plan work/publication/plan.json --payload work/publication
+          python -m publisher gc kyou --execute
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ${{ inputs.game }}-reports-${{ github.run_attempt }}
+          path: |
+            work/rizline/import-report.json
+            work/rizline/import-failures.json
+            work/rizline/supplement-template.json
+            work/build/manifest.json
+            work/publication/receipt-*.json
+          if-no-files-found: ignore
+          retention-days: 90
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 0
+        with:
+          name: ${{ inputs.game }}-shard-0-${{ github.run_attempt }}
+          path: work/publication/shard-0
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 1
+        with:
+          name: ${{ inputs.game }}-shard-1-${{ github.run_attempt }}
+          path: work/publication/shard-1
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 2
+        with:
+          name: ${{ inputs.game }}-shard-2-${{ github.run_attempt }}
+          path: work/publication/shard-2
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 3
+        with:
+          name: ${{ inputs.game }}-shard-3-${{ github.run_attempt }}
+          path: work/publication/shard-3
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 4
+        with:
+          name: ${{ inputs.game }}-shard-4-${{ github.run_attempt }}
+          path: work/publication/shard-4
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 5
+        with:
+          name: ${{ inputs.game }}-shard-5-${{ github.run_attempt }}
+          path: work/publication/shard-5
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 6
+        with:
+          name: ${{ inputs.game }}-shard-6-${{ github.run_attempt }}
+          path: work/publication/shard-6
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 7
+        with:
+          name: ${{ inputs.game }}-shard-7-${{ github.run_attempt }}
+          path: work/publication/shard-7
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+  upload:
+    needs: prepare
+    if: inputs.execute && inputs.game != 'kyou' && fromJSON(needs.prepare.outputs.shards) > 0
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    uses: ./.github/workflows/upload-shard.yml
+    with:
+      game: ${{ inputs.game }}
+      environment: ${{ inputs.environment }}
+      shard: ${{ matrix.shard }}
+      attempt: ${{ needs.prepare.outputs.attempt }}
+    secrets: inherit
+  finalize:
+    needs: [prepare, upload]
+    if: ${{ !cancelled() && inputs.execute && inputs.game != 'kyou' && needs.prepare.result == 'success' && (needs.upload.result == 'success' || needs.upload.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python -m pip install 'boto3>=1.40,<2'
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.game }}-plan-${{ needs.prepare.outputs.attempt }}
+          path: work/publication
+      - uses: actions/download-artifact@v8
+        if: fromJSON(needs.prepare.outputs.shards) > 0
+        with:
+          pattern: ${{ inputs.game }}-receipt-*-${{ needs.prepare.outputs.attempt }}
+          path: work/receipts
+          merge-multiple: true
+      - name: Verify complete publication and switch pointer
+        run: |
+          python -m publisher finalize --plan work/publication/plan.json --receipts work/receipts
+          python -m publisher gc "$GAME" --execute
+        env:
+          GAME: ${{ inputs.game }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}

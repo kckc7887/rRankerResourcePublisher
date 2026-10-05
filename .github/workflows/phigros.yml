@@ -1,0 +1,29 @@
+name: Publish phigros
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: 实际发布；默认仅生成计划
+        type: boolean
+        default: false
+      migrate:
+        description: 仅迁移当前桶内资源，跳过上游解析
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: resource-phigros
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.event_name != 'schedule' || vars.RESOURCE_SCHEDULES_ENABLED == 'true'
+    uses: ./.github/workflows/resource-publish.yml
+    with:
+      game: phigros
+      environment: S3_BUCKET_PHIGROS
+      execute: ${{ github.event_name == 'schedule' || inputs.execute }}
+      migrate: ${{ inputs.migrate || false }}
+    secrets: inherit
