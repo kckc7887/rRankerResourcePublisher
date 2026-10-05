@@ -56,7 +56,15 @@ def verify_apk(path, abi, version):
     if fields.get("name") != "com.rranker.app" or fields.get("versionName") != version:
         raise ValueError(f"APK package/version mismatch: {path.name}")
     signature = run("apksigner", "verify", "--verbose", "--print-certs")
-    certificates = re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F:]+)$", signature, re.MULTILINE)
+    certificates = []
+    for line in signature.splitlines():
+        line = line.strip()
+        if " certificate SHA-256 digest:" not in line or line.startswith("Source Stamp Signer"):
+            continue
+        match = re.fullmatch(r"(?:Signer #\d+|V(?:1|2|3\.0) Signer:) certificate SHA-256 digest: ([0-9a-fA-F:]+)", line)
+        if not match:
+            raise ValueError(f"Unrecognized APK signing certificate summary: {path.name}")
+        certificates.append(match[1])
     if len(certificates) != 1 or certificates[0].replace(":", "").lower() != CERTIFICATE:
         raise ValueError(f"APK signing certificate mismatch: {path.name}")
     return int(fields["versionCode"])

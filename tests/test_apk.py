@@ -101,6 +101,19 @@ class ApkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "signing certificate"):
                 verify_apk(path, "x86", "0.3.0")
 
+    def test_build_tools_signer_formats_and_multiple_signers(self):
+        path = self.root / "fixture.apk"
+        path.write_bytes(apk_bytes("x86"))
+        for prefix in ("Signer #1", "V1 Signer:", "V2 Signer:", "V3.0 Signer:"):
+            with self.subTest(prefix=prefix):
+                output = f"{prefix} certificate SHA-256 digest: {CERTIFICATE}\n"
+                with patch("publisher.apk.subprocess.check_output", side_effect=[self.tool_output(["badging"]), output]):
+                    self.assertEqual(verify_apk(path, "x86", "0.3.0"), 3)
+        output = f"Signer #1 certificate SHA-256 digest: {CERTIFICATE}\nSigner #2 certificate SHA-256 digest: {CERTIFICATE}\n"
+        with patch("publisher.apk.subprocess.check_output", side_effect=[self.tool_output(["badging"]), output]):
+            with self.assertRaisesRegex(ValueError, "signing certificate mismatch"):
+                verify_apk(path, "x86", "0.3.0")
+
 
 if __name__ == "__main__":
     unittest.main()
