@@ -1,6 +1,6 @@
 # rRankerResourcePublisher
 
-统一发布 rRanker 使用的 Phigros、Rizline、Kyou 资源和正式 Release APK。解析模块保留各自数据口径，对象存储、差量计划、分片执行和入口切换共用 `publisher`。
+统一发布 rRanker 使用的 Phigros、Rizline、Kyou 资源、正式 Release APK，以及 maimai DXTag。Phigros、Rizline、Kyou 的解析模块保留各自数据口径，对象存储、差量计划、分片执行和入口切换共用 `publisher`。
 
 ## 发布入口
 
@@ -9,11 +9,12 @@
 | `rizline.yml` | 每天 08:00 | `S3_BUCKET_RIZLINE` |
 | `kyou.yml` | 每天 08:00 | `S3_BUCKET_PHIGROS` |
 | `phigros.yml` | 每天 12:00 | `S3_BUCKET_PHIGROS` |
+| `dxtag.yml` | 每天 12:00 | `S3_BUCKET_MAIMAI` |
 | `apk.yml` | rRanker 正式 Release published | `S3_BUCKET_RRANKER` |
 
 资源工作流只有仓库变量 `RESOURCE_SCHEDULES_ENABLED=true` 时执行定时发布。手动运行默认仅生成计划；`migrate` 直接采用当前桶内字节，跳过上游解析。实际发布仅允许 `master`。push/PR 的 `ci.yml` 只运行解析和发布行为测试、工作流检查，不使用存储凭据。
 
-各 Environment 提供变量 `S3_BUCKET_NAME` 和 Secrets `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`；仓库 Secret 为 `S3_ENDPOINT`。Phigros 与 Kyou 使用同一桶、独立资源组。所有删除均依据具体哈希对象，不执行桶根同步。
+各 Environment 提供变量 `S3_BUCKET_NAME` 和 Secrets `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`；仓库 Secret 为 `S3_ENDPOINT`。Phigros 与 Kyou 使用同一桶、独立资源组。`S3_BUCKET_MAIMAI` 的桶名是 `rranker-maimai-data`。所有删除均依据具体哈希对象，不执行桶根同步。
 
 ## 对象与合同
 
@@ -24,6 +25,8 @@
 | Phigros | `avatars`、`charts`、`illustrations`、`illustrations-blur`、`illustrations-lowres`、`music`、`metadata` |
 | Rizline | `covers`、`audio`、`charts`、`metadata` |
 | Kyou | `data` |
+
+`DXTag/{谱面文件ID}.json` 在 maimai 桶内按固定 ID 存放，不进入上述清单和清理。标准谱的 ID 是歌曲 ID，DX 谱的 ID 是歌曲 ID 加 10000。宴谱不生成对象。每份文件是难度 ID 与五维数组的列表；难度 ID 为 `0` 到 `4`，五维顺序为键盘、星星、技巧、体力、爆发。已有对象不读取、不覆盖、不删除。手动运行默认只列出缺失 ID。
 
 对象名为 `<sha256>.<扩展名>`。Phigros 清单 `assets` 中的 `path` 是歌曲、难度、变体的逻辑地址，`objectKey` 是实际桶路径，同时记录 `size`、`sha256`、`contentType`。指针的 `catalog`、`noteCounts` 必须与对应清单项一致。Rizline 清单使用 `files` 与 `catalogPath`，曲库保持 schemaVersion 1，内部引用直接使用固定对象路径。Kyou 清单保留抓取统计，`files` 增加 `name` 到 `path/size/sha256/contentType` 的映射。
 
@@ -62,6 +65,7 @@ python -m publisher build phigros --output work/build
 python -m publisher prepare phigros --input work/build --output work/publication
 python -m publisher migrate phigros --output work/migration
 python -m publisher gc phigros
+python -m publisher dxtag
 ```
 
 `prepare`、`migrate` 和默认 `gc` 只读远端。`shard` 执行单片对象写入，`finalize` 检查全部回执并提交入口。`publish-plan` 顺序执行计划与提交，用于 Kyou；`gc --execute` 删除已核实的退役对象。生产流水线对 Phigros 和 Rizline 使用子工作流。
@@ -84,3 +88,4 @@ Rizline 的 CRI UTF、AFS2、HCA 元数据核验参考 [vgmstream 固定提交](
 - [limmy114/rizline-tool](https://github.com/limmy114/rizline-tool)
 - [CHCAT1320/rizline-assets-get](https://github.com/CHCAT1320/rizline-assets-get)
 - [kckc7887/kyou-crawler](https://github.com/kckc7887/kyou-crawler)
+- [kckc7887/DXTag](https://github.com/kckc7887/DXTag)

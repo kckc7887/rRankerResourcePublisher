@@ -16,7 +16,7 @@ CATEGORIES = {
     "rizline": {"covers", "audio", "charts", "metadata"},
     "kyou": {"data"},
 }
-BUCKETS = {"phigros": "rranker-phigros-data", "kyou": "rranker-phigros-data", "rizline": "rranker-rizline-data", "apk": "rranker"}
+BUCKETS = {"phigros": "rranker-phigros-data", "kyou": "rranker-phigros-data", "rizline": "rranker-rizline-data", "apk": "rranker", "dxtag": "rranker-maimai-data"}
 
 
 def encode(value):

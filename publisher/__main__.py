@@ -33,12 +33,23 @@ def main():
     single = commands.add_parser("publish-plan")
     single.add_argument("--plan", type=Path, required=True)
     single.add_argument("--payload", type=Path, required=True)
+    dxtag = commands.add_parser("dxtag")
+    dxtag.add_argument("--execute", action="store_true")
+    dxtag.add_argument("--output", type=Path, default=Path("work/dxtag"))
     args = parser.parse_args()
+    failed = False
     if args.command == "build":
         from .build import build
         build(args.game, args.output)
         return
-    if args.command in ("prepare", "migrate"):
+    if args.command == "dxtag":
+        from .dxtag import DxtagIncomplete, publish
+        try:
+            result = publish(execute=args.execute, output=args.output)
+        except DxtagIncomplete as error:
+            result = error.result
+            failed = True
+    elif args.command in ("prepare", "migrate"):
         migration = args.command == "migrate"
         candidate = migration_candidate(args.game, args.output / "metadata") if migration else local_candidate(args.game, args.input, args.output / "metadata")
         plan = prepare(args.game, candidate, args.output, migration=migration)
@@ -64,6 +75,8 @@ def main():
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a", encoding="utf-8") as summary:
             summary.write("```json\n" + json.dumps(result, ensure_ascii=False, indent=2) + "\n```\n")
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
