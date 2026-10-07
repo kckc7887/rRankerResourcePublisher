@@ -9,7 +9,7 @@ import subprocess
 import requests
 from botocore.exceptions import ClientError
 
-from .storage import Storage, safe_path
+from .storage import Storage, encode, parallel, safe_path
 
 SONG_LIST_URL = "https://maimai.lxns.net/api/v0/maimai/song/list"
 CHART_URL = "https://assets2.lxns.net/maimai/chart/{chart_id}.txt"
@@ -115,8 +115,9 @@ def publish(*, execute=False, output=Path("work/dxtag")):
     storage = Storage("dxtag")
     response = requests.get(SONG_LIST_URL, timeout=(10, 60))
     response.raise_for_status()
-    missing = sorted(expected_chart_ids(response.json()) - present_chart_ids(storage.list("DXTag/")))
-    result = {"missing": missing, "uploaded": [], "failed": []}
+    expected = expected_chart_ids(response.json())
+    missing = sorted(expected - present_chart_ids(storage.list("DXTag/")))
+    result = {"missing": missing, "uploaded": [], "failed": [], "library": None}
     if not execute:
         return result
     output.mkdir(parents=True, exist_ok=True)
@@ -132,4 +133,7 @@ def publish(*, execute=False, output=Path("work/dxtag")):
             result["failed"].append({"id": chart_id, "error": str(error)[:500]})
     if result["failed"]:
         raise DxtagIncomplete(result)
+    library = dict(parallel(lambda chart_id: (str(chart_id), storage.json(object_key(chart_id))[0]), sorted(expected)))
+    storage.put("DXTag/all.json", encode(library), "application/json")
+    result["library"] = {"key": "DXTag/all.json", "charts": len(library)}
     return result

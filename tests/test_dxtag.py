@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 import requests
+from botocore.exceptions import ClientError
 
 from publisher.__main__ import main
 from publisher.dxtag import SONG_LIST_URL
@@ -100,6 +101,7 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(self.urls, [SONG_LIST_URL])
         self.assertEqual(self.s3.writes, [])
         self.assertEqual(self.s3.objects["DXTag/8.json"]["Body"], b"keep")
+        self.assertIsNone(result["library"])
         self.assertEqual(self.s3.reads, [])
 
     def test_leading_zero_object_does_not_satisfy_chart_id(self):
@@ -117,29 +119,79 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(result["uploaded"], [10030])
         self.assertEqual(self.s3.objects["DXTag/10030.json"]["Body"],
                          b'[{"difficulty":0,"scores":[0.0,10.0,1.0,1.5,9.0]},{"difficulty":4,"scores":[0.0,10.0,1.0,1.5,9.0]}]\n')
-        self.assertEqual(self.s3.reads, [])
+        self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {
+            "10030": [{"difficulty": difficulty, "scores": [0, 10, 1, 1.5, 9]} for difficulty in (0, 4)],
+        })
 
     def test_existing_object_is_left_unchanged(self):
         self.catalog = {"songs": [{"id": 30, "difficulties": {"standard": [{}], "dx": [{}]}}]}
-        self.s3.seed("DXTag/30.json", b"keep")
+        existing = b'[{"difficulty":2,"scores":[1,2,3,4,5]}]\n'
+        self.s3.seed("DXTag/30.json", existing)
         code, result = self.publish("--execute")
         self.assertEqual(code, 0)
         self.assertEqual(result["uploaded"], [10030])
-        self.assertEqual(self.s3.objects["DXTag/30.json"]["Body"], b"keep")
-        self.assertEqual([key for mode, key, _size in self.s3.writes], ["DXTag/10030.json"])
+        self.assertEqual(self.s3.objects["DXTag/30.json"]["Body"], existing)
+        self.assertEqual([key for mode, key, _size in self.s3.writes], ["DXTag/10030.json", "DXTag/all.json"])
+        self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {
+            "30": json.loads(existing),
+            "10030": [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}],
+        })
 
     def test_precondition_failure_does_not_replace_bytes(self):
         self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
-        self.s3.seed("DXTag/8.json", b"keep")
+        existing = b'[{"difficulty":0,"scores":[5,4,3,2,1]}]\n'
+        self.s3.seed("DXTag/8.json", existing)
         self.s3.paginate = lambda Bucket, Prefix: [{"Contents": []}]
         code, result = self.publish("--execute")
         self.assertEqual(code, 0)
         self.assertEqual(result["uploaded"], [])
         self.assertEqual(result["failed"], [])
-        self.assertEqual(self.s3.objects["DXTag/8.json"]["Body"], b"keep")
+        self.assertEqual(self.s3.objects["DXTag/8.json"]["Body"], existing)
+        self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {"8": json.loads(existing)})
+
+    def test_full_library_is_created_without_missing_charts_and_refreshed_on_update(self):
+        existing = b'[{"difficulty":3,"scores":[1,2,3,4,5]}]\n'
+        for chart_id in (8, 30, 10030, 11639):
+            self.s3.seed(f"DXTag/{chart_id}.json", existing)
+        self.s3.seed("DXTag/08.json", b"alias")
+        self.s3.seed("DXTag/extra.txt", b"extra")
+        code, result = self.publish("--execute")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["missing"], [])
+        self.assertEqual(result["library"], {"key": "DXTag/all.json", "charts": 4})
+        self.assertEqual(self.urls, [SONG_LIST_URL])
+        self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {
+            str(chart_id): json.loads(existing) for chart_id in (8, 30, 10030, 11639)
+        })
+
+        self.catalog["songs"].append({"id": 50, "difficulties": {"standard": [{}], "dx": []}})
+        code, result = self.publish("--execute")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["uploaded"], [50])
+        library = json.loads(self.s3.objects["DXTag/all.json"]["Body"])
+        self.assertEqual(set(library), {"8", "30", "50", "10030", "11639"})
+        self.assertEqual(library["50"], [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}])
+
+    def test_unreadable_chart_keeps_previous_full_library(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        previous = b'{"8":[{"difficulty":3,"scores":[1,2,3,4,5]}]}\n'
+        self.s3.seed("DXTag/all.json", previous)
+        self.s3.seed("DXTag/8.json", b"invalid json")
+        with self.assertRaises(ValueError):
+            self.publish("--execute")
+        self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
+        self.assertEqual(self.s3.writes, [])
+
+        with patch.object(self.s3, "get_object", side_effect=lambda **kwargs: self.s3.error(503)):
+            with self.assertRaises(ClientError):
+                self.publish("--execute")
+        self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
+        self.assertEqual(self.s3.writes, [])
 
     def test_failed_chart_keeps_successful_upload_and_exits(self):
         self.catalog = {"songs": [{"id": 30, "difficulties": {"standard": [{}], "dx": [{}]}}]}
+        previous = b'{"30":[{"difficulty":3,"scores":[1,2,3,4,5]}]}\n'
+        self.s3.seed("DXTag/all.json", previous)
         self.chart_bytes[30] = b"fail"
         code, result = self.publish("--execute")
         self.assertEqual(code, 1)
@@ -147,6 +199,8 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in result["failed"]], [30])
         self.assertNotIn("DXTag/30.json", self.s3.objects)
         self.assertEqual(self.s3.objects["DXTag/10030.json"]["Body"], b'[{"difficulty":3,"scores":[1.2,3.4,5.6,7.8,9.0]}]\n')
+        self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
+        self.assertIsNone(result["library"])
 
     def test_missing_chart_download_is_not_uploaded(self):
         self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}

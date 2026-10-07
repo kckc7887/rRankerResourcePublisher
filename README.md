@@ -26,7 +26,9 @@
 | Rizline | `covers`、`audio`、`charts`、`metadata` |
 | Kyou | `data` |
 
-`DXTag/{谱面文件ID}.json` 在 maimai 桶内按固定 ID 存放，不进入上述清单和清理。标准谱的 ID 是歌曲 ID，DX 谱的 ID 是歌曲 ID 加 10000。宴谱不生成对象。每份文件是难度 ID 与五维数组的列表；难度 ID 为 `0` 到 `4`，五维顺序为键盘、星星、技巧、体力、爆发。已有对象不读取、不覆盖、不删除。手动运行默认只列出缺失 ID。
+`DXTag/{谱面文件ID}.json` 在 maimai 桶内按固定 ID 存放，不进入上述清单和清理。标准谱的 ID 是歌曲 ID，DX 谱的 ID 是歌曲 ID 加 10000。宴谱不生成对象。每份文件是难度 ID 与五维数组的列表；难度 ID 为 `0` 到 `4`，五维顺序为键盘、星星、技巧、体力、爆发。已有单曲对象不重新计算、不覆盖、不删除。手动运行默认只列出缺失 ID。
+
+`DXTag/all.json` 是独立全曲库版，JSON 对象的键为谱面文件 ID 字符串，值为对应单曲文件的难度与五维数组列表，包含当前 LXNS 曲库的全部标准谱和 DX 谱。每天定时发布或手动开启 `execute` 时，先补齐单曲对象，再读取当前曲库对应的全部单曲对象并更新全曲库版；没有新增谱面时也会更新。单曲补齐或汇总读取失败时保留上一次全曲库文件，任务报错。全曲库地址不使用永久缓存，也不进入其他资源组的清理。
 
 对象名为 `<sha256>.<扩展名>`。Phigros 清单 `assets` 中的 `path` 是歌曲、难度、变体的逻辑地址，`objectKey` 是实际桶路径，同时记录 `size`、`sha256`、`contentType`。指针的 `catalog`、`noteCounts` 必须与对应清单项一致。Rizline 清单使用 `files` 与 `catalogPath`，曲库保持 schemaVersion 1，内部引用直接使用固定对象路径。Kyou 清单保留抓取统计，`files` 增加 `name` 到 `path/size/sha256/contentType` 的映射。
 

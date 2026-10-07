@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       execute:
-        description: 实际上传缺失曲目；默认只列出缺失
+        description: 补齐缺失曲目并更新全曲库版；默认只列出缺失
         type: boolean
         default: false
 permissions:
@@ -51,7 +51,7 @@ jobs:
         if: github.event_name == 'schedule' || inputs.execute
         working-directory: DXTag
         run: npm ci && npm run build
-      - name: Fill missing DXTag charts
+      - name: Fill missing DXTag charts and publish full library
         env:
           EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute }}
           DXTAG_ROOT: ${{ github.workspace }}/DXTag
