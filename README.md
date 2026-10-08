@@ -32,6 +32,8 @@
 
 对象名为 `<sha256>.<扩展名>`。Phigros 清单 `assets` 中的 `path` 是歌曲、难度、变体的逻辑地址，`objectKey` 是实际桶路径，同时记录 `size`、`sha256`、`contentType`。指针的 `catalog`、`noteCounts` 必须与对应清单项一致。Rizline 清单使用 `files` 与 `catalogPath`，曲库保持 schemaVersion 1，内部引用直接使用固定对象路径。Kyou 清单保留抓取统计，`files` 增加 `name` 到 `path/size/sha256/contentType` 的映射。
 
+Phigros 的物量表每行按歌曲排列 EZ、HD、IN、可选 AT，各难度为 `[Tap,Hold,Drag,Flick]`；谱面根节点 `blockAreaList` 非空时，追加其数组长度作为第五项 BLOCK。缺失、null 或空数组不追加第五项，异常非数组值使统计失败。BLOCK 独立显示，总物量仅累加四种音符。
+
 内容身份不包含发布或抓取时间。无变化时不上传、不复制、不回读大资源；单个文件改变只上传该对象。Phigros、Rizline 的差量按字节量均衡分到最多 8 个 `upload-shard.yml` 子工作流，子工作流只下载自己的增量产物。Kyou 在单独抓取作业内完成发布。资源组入口串行，各组可并行，子工作流不持有父工作流锁。
 
 Phigros 媒体项另存 `contentSha256`：PNG 校验像素、尺寸和图像元数据；Vorbis 校验识别头、配置头、音频包、用户标签及采样位置，仅忽略工具的 vendor 标识。只有内容一致时才复用已有对象及其原始 SHA-256，避免不同平台的 PNG 压缩和 Vorbis 库标识引起整批重传。首次建立指纹时完整读取并核验已有媒体，之后直接使用清单中的指纹；缺失或损坏的基线不回退上传。音乐提取保留共用曲目，谱面变体通过逻辑路径关联。

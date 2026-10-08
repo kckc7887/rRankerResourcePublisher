@@ -1,3 +1,4 @@
+import csv
 import importlib.util
 import json
 from pathlib import Path
@@ -51,6 +52,42 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(second['current']['resourceVersion'], 'bundle')
         self.assertEqual(first['version_dir'], second['version_dir'])
         self.assertEqual(len(second['current']['manifestSha256']), 64)
+
+    def test_note_counts_include_blocks_per_difficulty(self):
+        (self.extracted / "metadata/difficulty.tsv").write_text("Song.A\t1\t5\t10\t15\n")
+        line = {"notesAbove": [{"type": 1}, {"type": 2}],
+                "notesBelow": [{"type": 3}, {"type": 4}]}
+        areas = [None, [], [{"move": [{}, {}, {}]}], [{"subtract": True}, {}]]
+        for level, blocks in zip(("EZ", "HD", "IN", "AT"), areas):
+            chart = {"judgeLineList": [line]}
+            if blocks is not None:
+                chart["blockAreaList"] = blocks
+            (self.extracted / f"chart/Song.A.0/{level}.json").write_text(json.dumps(chart))
+        release = self.release()
+        with (Path(release["version_dir"]) / "metadata/note_counts.tsv").open(encoding="utf-8", newline="") as source:
+            row = next(csv.reader(source, delimiter="\t"))
+        self.assertEqual(row[0], "Song.A.0")
+        self.assertEqual([json.loads(cell) for cell in row[1:]],
+                         [[1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1, 1], [1, 1, 1, 1, 2]])
+        self.assertEqual(validate_release(release)["missingResources"], [])
+
+    def test_note_counts_omit_absent_null_and_empty_blocks(self):
+        for extra in ({}, {"blockAreaList": None}, {"blockAreaList": []}):
+            with self.subTest(extra=extra):
+                chart = {"judgeLineList": [{"notesAbove": [{"type": 1}]}], **extra}
+                (self.extracted / "chart/Song.A.0/EZ.json").write_text(json.dumps(chart))
+                release = self.release()
+                with (Path(release["version_dir"]) / "metadata/note_counts.tsv").open(encoding="utf-8", newline="") as source:
+                    row = next(csv.reader(source, delimiter="\t"))
+                self.assertEqual(json.loads(row[1]), [1, 0, 0, 0])
+
+    def test_invalid_block_area_list_cannot_publish(self):
+        for blocks in ("invalid", {}, 3):
+            with self.subTest(blocks=blocks):
+                chart = {"judgeLineList": [], "blockAreaList": blocks}
+                (self.extracted / "chart/Song.A.0/EZ.json").write_text(json.dumps(chart))
+                with self.assertRaisesRegex(ValueError, "谱面物量统计失败"):
+                    self.release()
 
     def test_empty_music_directory_cannot_publish(self):
         (self.extracted / 'music/Song.A.ogg').unlink()

@@ -8,7 +8,7 @@ from typing import Any
 from .parallel import bounded_map
 
 # 官方谱面 JSON：type 1=Tap, 2=Drag, 3=Hold, 4=Flick
-# 物量表数组顺序：[Tap, Hold, Drag, Flick]
+# 物量表顺序：[Tap, Hold, Drag, Flick]，有区域时追加 BLOCK。
 NOTE_TYPE_TO_INDEX = {1: 0, 3: 1, 2: 2, 4: 3}
 DIFFICULTY_FILES = ("EZ", "HD", "IN", "AT")
 
@@ -26,6 +26,12 @@ def count_chart_notes(chart: dict[str, Any]) -> list[int]:
                 if index is None:
                     continue
                 counts[index] += 1
+    blocks = chart.get("blockAreaList")
+    if blocks is not None:
+        if not isinstance(blocks, list):
+            raise ValueError("blockAreaList 必须为数组")
+        if blocks:
+            counts.append(len(blocks))
     return counts
 
 
