@@ -86,6 +86,11 @@ class Storage:
                           retries={"max_attempts": 4, "mode": "standard"}, max_pool_connections=16,
                           request_checksum_calculation="when_required", response_checksum_validation="when_required"),
         )
+        if game == "kyou":
+            def send_body(request, **kwargs):
+                request.headers.pop("Expect", None)
+            for operation in ("PutObject", "UploadPart"):
+                self.client.meta.events.register(f"before-send.s3.{operation}", send_body)
 
     def head(self, key):
         try:
@@ -176,6 +181,7 @@ class Storage:
 
     def _multipart_put(self, args):
         target = {name: args[name] for name in ("Bucket", "Key")}
+        print(f"Starting multipart upload: {args['Key']}", flush=True)
         upload = self.client.create_multipart_upload(**{name: value for name, value in args.items()
                                                        if name not in ("Body", "IfMatch", "IfNoneMatch")})
         upload_id = upload["UploadId"]
@@ -183,8 +189,10 @@ class Storage:
         try:
             parts = []
             while chunk := source.read(8 * 1024 * 1024):
+                print(f"Uploading part {len(parts) + 1} ({len(chunk)} bytes): {args['Key']}", flush=True)
                 part = self.client.upload_part(**target, UploadId=upload_id, PartNumber=len(parts) + 1, Body=chunk)
                 parts.append({"PartNumber": len(parts) + 1, "ETag": part["ETag"]})
+            print(f"Completing multipart upload: {args['Key']}", flush=True)
             response = self.client.complete_multipart_upload(
                 **target, UploadId=upload_id, MultipartUpload={"Parts": parts},
                 **{name: args[name] for name in ("IfMatch", "IfNoneMatch") if name in args})

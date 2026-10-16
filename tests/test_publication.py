@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from botocore.exceptions import ClientError
 
@@ -18,6 +18,7 @@ from publisher.storage import Storage, digest, encode, owned_key
 
 class S3:
     def __init__(self):
+        self.meta = Mock()
         self.objects = {}
         self.writes = []
         self.reads = []
