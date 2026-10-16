@@ -92,6 +92,9 @@ class PublicationTests(unittest.TestCase):
         mocked = patch("publisher.storage.boto3.client", return_value=self.s3)
         mocked.start()
         self.addCleanup(mocked.stop)
+        delay = patch("publisher.storage.time.sleep")
+        delay.start()
+        self.addCleanup(delay.stop)
 
     def candidate(self, values=None, migration=False):
         values = values or {"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": b"music", "charts/song.0/IN.json": b"chart"}
@@ -180,6 +183,66 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(ClientError):
             self.publish(candidate)
         self.assertEqual(self.s3.objects["phigros/latest.json"]["Body"], winner)
+
+    def test_conditional_pointer_retry_after_false_not_found(self):
+        self.publish(self.candidate(), migration=True)
+        candidate = self.candidate({"catalog.json": b"updated catalog", "metadata/note_counts.tsv": b"notes"})
+        put = self.s3.put_object
+        failed = False
+
+        def transient(**args):
+            nonlocal failed
+            if args["Key"].endswith("/latest.json") and not failed:
+                failed = True
+                self.s3.error(404)
+            return put(**args)
+
+        with patch.object(self.s3, "put_object", side_effect=transient):
+            _, result = self.publish(candidate)
+        self.assertEqual(read_release(Storage("phigros"), "phigros")["pointer"], result["pointer"])
+        self.assertEqual(result["pointer"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
+
+    def test_conditional_upload_retry_rewinds_consumed_file(self):
+        self.publish(self.candidate(), migration=True)
+        data = b"updated music"
+        candidate = self.candidate({"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": data})
+        put = self.s3.put_object
+        failed = False
+
+        def transient(**args):
+            nonlocal failed
+            if args["Key"].startswith("phigros/music/") and not failed:
+                failed = True
+                args["Body"].read()
+                self.s3.error(503)
+            return put(**args)
+
+        with patch.object(self.s3, "put_object", side_effect=transient):
+            self.publish(candidate)
+        self.assertEqual(self.s3.objects[f"phigros/music/{digest(data)}.ogg"]["Body"], data)
+        self.assertEqual(read_release(Storage("phigros"), "phigros")["manifest"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
+
+    def test_conditional_write_readback_accepts_committed_error(self):
+        self.publish(self.candidate(), migration=True)
+        for prefix in ("phigros/music/", "phigros/latest.json"):
+            with self.subTest(prefix=prefix):
+                data = prefix.encode()
+                candidate = self.candidate({"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": data})
+                put = self.s3.put_object
+                failed = False
+
+                def committed(**args):
+                    nonlocal failed
+                    result = put(**args)
+                    if args["Key"].startswith(prefix) and not failed:
+                        failed = True
+                        self.s3.error(503)
+                    return result
+
+                with patch.object(self.s3, "put_object", side_effect=committed):
+                    self.publish(candidate)
+                self.assertEqual(self.s3.objects[f"phigros/music/{digest(data)}.ogg"]["Body"], data)
+                self.assertEqual(read_release(Storage("phigros"), "phigros")["manifest"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
 
     def test_reused_destination_is_verified_before_pointer(self):
         candidate = self.candidate(migration=True)

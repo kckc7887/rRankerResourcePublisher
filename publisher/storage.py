@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -139,7 +140,34 @@ class Storage:
             args["IfNoneMatch"] = "*"
         if sha256:
             args["Metadata"] = {"sha256": sha256}
-        return self.client.put_object(**args)["ETag"]
+        position = body.tell() if hasattr(body, "tell") else None
+        for attempt in range(3):
+            try:
+                return self.client.put_object(**args)["ETag"]
+            except ClientError as error:
+                status = error.response["ResponseMetadata"]["HTTPStatusCode"]
+                if not (etag or absent) or status not in (404, 409, 412, 500, 502, 503, 504):
+                    raise
+                head = self.head(key)
+                if head and (absent or head["ETag"] != etag):
+                    if position is None:
+                        size, expected = len(body), digest(body)
+                    else:
+                        body.seek(0, 2)
+                        size = body.tell() - position
+                        body.seek(position)
+                        expected = sha256 or hashlib.file_digest(body, "sha256").hexdigest()
+                        body.seek(position)
+                    try:
+                        return self.verify(key, size, expected, head["ETag"])
+                    except ValueError:
+                        raise error
+                if status == 412 or (etag and head is None) or attempt == 2:
+                    raise
+                print(f"Retrying conditional write after HTTP {status}: {key}", flush=True)
+                time.sleep(2 ** (attempt + 1))
+                if position is not None:
+                    body.seek(position)
 
     def copy(self, source, etag, target, sha256, content_type, *, immutable=True):
         return self.client.copy_object(
