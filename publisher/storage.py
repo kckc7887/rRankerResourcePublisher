@@ -146,7 +146,7 @@ class Storage:
                 return self.client.put_object(**args)["ETag"]
             except ClientError as error:
                 status = error.response["ResponseMetadata"]["HTTPStatusCode"]
-                if not (etag or absent) or status not in (404, 409, 412, 500, 502, 503, 504):
+                if not (etag or absent or (immutable and sha256)) or status not in (404, 409, 412, 500, 502, 503, 504):
                     raise
                 head = self.head(key)
                 if head and (absent or head["ETag"] != etag):
@@ -164,7 +164,7 @@ class Storage:
                         raise error
                 if status == 412 or (etag and head is None) or attempt == 2:
                     raise
-                print(f"Retrying conditional write after HTTP {status}: {key}", flush=True)
+                print(f"Retrying object write after HTTP {status}: {key}", flush=True)
                 time.sleep(2 ** (attempt + 1))
                 if position is not None:
                     body.seek(position)

@@ -202,7 +202,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(read_release(Storage("phigros"), "phigros")["pointer"], result["pointer"])
         self.assertEqual(result["pointer"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
 
-    def test_conditional_upload_retry_rewinds_consumed_file(self):
+    def test_immutable_upload_retry_rewinds_consumed_file(self):
         self.publish(self.candidate(), migration=True)
         data = b"updated music"
         candidate = self.candidate({"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": data})
@@ -211,10 +211,13 @@ class PublicationTests(unittest.TestCase):
 
         def transient(**args):
             nonlocal failed
-            if args["Key"].startswith("phigros/music/") and not failed:
-                failed = True
-                args["Body"].read()
-                self.s3.error(503)
+            if args["Key"].startswith("phigros/music/"):
+                if args.get("IfNoneMatch"):
+                    self.s3.error(503)
+                if not failed:
+                    failed = True
+                    args["Body"].read()
+                    self.s3.error(503)
             return put(**args)
 
         with patch.object(self.s3, "put_object", side_effect=transient):

@@ -138,7 +138,7 @@ def upload_shard(plan, shard_id, payload, receipt):
                 if path.stat().st_size != item["size"] or file_digest(path) != item["sha256"]:
                     raise ValueError(f"Shard payload corrupted: {key}")
                 with path.open("rb") as source:
-                    etag = storage.put(key, source, item["contentType"], absent=True, sha256=item["sha256"], immutable=True)
+                    etag = storage.put(key, source, item["contentType"], sha256=item["sha256"], immutable=True)
             storage.verify(key, item["size"], item["sha256"], etag)
         results.append({"key": key, "etag": etag})
     result = {"plan": plan["id"], "shard": shard_id, "objects": results}
@@ -189,7 +189,7 @@ def finalize(plan, receipts):
     key = f"{game}/manifests/{sha}.json"
     head = storage.head(key)
     if head is None:
-        storage.put(key, body, "application/json", absent=True, sha256=sha, immutable=True)
+        storage.put(key, body, "application/json", sha256=sha, immutable=True)
     storage.verify(key, len(body), sha)
     pointer = {**plan["pointer"], "schemaVersion": 2, "resourceVersion": manifest["resourceVersion"],
                "manifestSha256": sha, "publishedAt": manifest["publishedAt"]}
