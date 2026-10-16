@@ -13,6 +13,8 @@ from urllib.parse import urlencode
 
 from playwright.async_api import async_playwright, Browser
 
+from publisher.storage import encode
+
 SITE_ORIGIN = "https://kyou.net.cn"
 SONGLIST_PATH = "/api/songs/songlist"
 TAG_TREE_PATH = "/api/tags/tree"
@@ -22,7 +24,7 @@ STANDARD_DIFFS = ["ez", "hd", "in", "at"]
 
 def write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_bytes(encode(obj))
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str] | None = None) -> None:
