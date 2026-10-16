@@ -82,7 +82,7 @@ class Storage:
             aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
             aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
             region_name=os.environ.get("S3_REGION", "us-east-1"),
-            config=Config(signature_version="s3v4", s3={"addressing_style": "path"},
+            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual" if game == "kyou" else "path"},
                           retries={"max_attempts": 4, "mode": "standard"}, max_pool_connections=16,
                           request_checksum_calculation="when_required", response_checksum_validation="when_required"),
         )
