@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from botocore.exceptions import ClientError
@@ -22,6 +23,7 @@ class S3:
         self.reads = []
         self.fail_key = None
         self.race = None
+        self.uploads = {}
 
     def seed(self, key, body, *, days=0, metadata=None):
         self.objects[key] = {"Body": body, "ETag": '"' + digest(body) + '"', "ContentLength": len(body),
@@ -65,6 +67,41 @@ class S3:
             self.error(503)
         self.writes.append(("copy", Key, len(source["Body"])))
         return {"CopyObjectResult": {"ETag": self.seed(Key, source["Body"], metadata=kwargs.get("Metadata"))}}
+
+    def create_multipart_upload(self, Bucket, Key, **kwargs):
+        upload_id = uuid.uuid4().hex
+        self.uploads[upload_id] = {"Key": Key, "Metadata": kwargs.get("Metadata"), "parts": {}}
+        return {"UploadId": upload_id}
+
+    def upload_part(self, Bucket, Key, UploadId, PartNumber, Body):
+        if Key == self.fail_key:
+            self.error(503)
+        data = Body.read() if hasattr(Body, "read") else Body
+        etag = '"' + digest(data) + '"'
+        self.uploads[UploadId]["parts"][PartNumber] = (data, etag)
+        return {"ETag": etag}
+
+    def complete_multipart_upload(self, Bucket, Key, UploadId, MultipartUpload, IfMatch=None, IfNoneMatch=None):
+        if IfNoneMatch and Key in self.objects:
+            self.error(412)
+        if IfMatch and self.objects.get(Key, {}).get("ETag") != IfMatch:
+            self.error(412)
+        upload = self.uploads[UploadId]
+        data = b""
+        for part in MultipartUpload["Parts"]:
+            chunk, etag = upload["parts"][part["PartNumber"]]
+            if part["ETag"] != etag:
+                self.error(400)
+            data += chunk
+        self.writes.append(("multipart", Key, len(data)))
+        etag = self.seed(Key, data, metadata=upload["Metadata"])
+        del self.uploads[UploadId]
+        return {"ETag": etag}
+
+    def abort_multipart_upload(self, Bucket, Key, UploadId):
+        if UploadId not in self.uploads:
+            raise ClientError({"Error": {"Code": "NoSuchUpload"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "AbortMultipartUpload")
+        del self.uploads[UploadId]
 
     def get_paginator(self, operation):
         return self
@@ -161,6 +198,7 @@ class PublicationTests(unittest.TestCase):
         self.s3.fail_key = plan["tasks"][0]["key"]
         with self.assertRaises(ClientError):
             upload_shard(plan, plan["tasks"][0]["shard"], self.root / f"plan/shard-{plan['tasks'][0]['shard']}", self.root / "receipt.json")
+        self.assertEqual(self.s3.uploads, {})
         with self.assertRaisesRegex(ValueError, "child workflows"):
             finalize(plan, [])
         self.assertEqual(self.s3.objects["phigros/latest.json"]["Body"], original)
@@ -246,6 +284,27 @@ class PublicationTests(unittest.TestCase):
                     self.publish(candidate)
                 self.assertEqual(self.s3.objects[f"phigros/music/{digest(data)}.ogg"]["Body"], data)
                 self.assertEqual(read_release(Storage("phigros"), "phigros")["manifest"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
+
+    def test_multipart_commit_error_accepts_verified_object(self):
+        self.publish(self.candidate(), migration=True)
+        data = b"updated music"
+        candidate = self.candidate({"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": data})
+        put, complete = self.s3.put_object, self.s3.complete_multipart_upload
+
+        def unwritable(**args):
+            if args["Key"].startswith("phigros/music/"):
+                args["Body"].read()
+                self.s3.error(503)
+            return put(**args)
+
+        def committed(**args):
+            complete(**args)
+            self.s3.error(503)
+
+        with patch.object(self.s3, "put_object", side_effect=unwritable), patch.object(self.s3, "complete_multipart_upload", side_effect=committed):
+            self.publish(candidate)
+        self.assertEqual(self.s3.objects[f"phigros/music/{digest(data)}.ogg"]["Body"], data)
+        self.assertEqual(self.s3.uploads, {})
 
     def test_reused_destination_is_verified_before_pointer(self):
         candidate = self.candidate(migration=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -167,6 +168,10 @@ def finalize(plan, receipts):
         return {"unchanged": True, "pointer": latest["pointer"]}
     if (latest["etag"] if latest else None) != plan["baselineEtag"]:
         raise ValueError("Publication baseline changed; refusing pointer update")
+    if game == "kyou":
+        workflow = f"{os.environ.get('GITHUB_REPOSITORY')}/.github/workflows/kyou.yml@refs/heads/master"
+        if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_WORKFLOW_REF") != workflow:
+            raise ValueError("Kyou pointer updates require the serialized master workflow")
     def check_source(source):
         head = storage.head(source["key"])
         if not head or head["ETag"] != source["etag"]:
@@ -195,7 +200,13 @@ def finalize(plan, receipts):
                "manifestSha256": sha, "publishedAt": manifest["publishedAt"]}
     pointer["manifest" if game == "phigros" else "manifestPath"] = key
     raw = encode(pointer)
-    etag = storage.put(f"{game}/latest.json", raw, "application/json", etag=plan["baselineEtag"], absent=not plan["baselineEtag"])
+    if game == "kyou":
+        head = storage.head(f"{game}/latest.json")
+        if (head["ETag"] if head else None) != plan["baselineEtag"]:
+            raise ValueError("Publication baseline changed; refusing pointer update")
+        etag = storage.put(f"{game}/latest.json", raw, "application/json")
+    else:
+        etag = storage.put(f"{game}/latest.json", raw, "application/json", etag=plan["baselineEtag"], absent=not plan["baselineEtag"])
     actual, _ = storage.get(f"{game}/latest.json", etag)
     if actual != raw:
         raise ValueError("Pointer readback failed")

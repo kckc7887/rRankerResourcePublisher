@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -72,6 +73,7 @@ def parallel(function, items, workers=8):
 
 class Storage:
     def __init__(self, game):
+        self._game = game
         self.bucket = os.environ["S3_BUCKET_NAME"]
         if self.bucket != BUCKETS[game]:
             raise ValueError(f"Wrong bucket for {game}")
@@ -141,9 +143,10 @@ class Storage:
         if sha256:
             args["Metadata"] = {"sha256": sha256}
         position = body.tell() if hasattr(body, "tell") else None
+        multipart = self._game == "kyou" and immutable and bool(sha256)
         for attempt in range(3):
             try:
-                return self.client.put_object(**args)["ETag"]
+                return self._multipart_put(args) if multipart else self.client.put_object(**args)["ETag"]
             except ClientError as error:
                 status = error.response["ResponseMetadata"]["HTTPStatusCode"]
                 if not (etag or absent or (immutable and sha256)) or status not in (404, 409, 412, 500, 502, 503, 504):
@@ -164,10 +167,36 @@ class Storage:
                         raise error
                 if status == 412 or (etag and head is None) or attempt == 2:
                     raise
+                if immutable and sha256 and not etag and status >= 500:
+                    multipart = True
                 print(f"Retrying object write after HTTP {status}: {key}", flush=True)
                 time.sleep(2 ** (attempt + 1))
                 if position is not None:
                     body.seek(position)
+
+    def _multipart_put(self, args):
+        target = {name: args[name] for name in ("Bucket", "Key")}
+        upload = self.client.create_multipart_upload(**{name: value for name, value in args.items()
+                                                       if name not in ("Body", "IfMatch", "IfNoneMatch")})
+        upload_id = upload["UploadId"]
+        source = args["Body"] if hasattr(args["Body"], "read") else io.BytesIO(args["Body"])
+        try:
+            parts = []
+            while chunk := source.read(8 * 1024 * 1024):
+                part = self.client.upload_part(**target, UploadId=upload_id, PartNumber=len(parts) + 1, Body=chunk)
+                parts.append({"PartNumber": len(parts) + 1, "ETag": part["ETag"]})
+            response = self.client.complete_multipart_upload(
+                **target, UploadId=upload_id, MultipartUpload={"Parts": parts},
+                **{name: args[name] for name in ("IfMatch", "IfNoneMatch") if name in args})
+            upload_id = None
+            return response["ETag"]
+        finally:
+            if upload_id:
+                try:
+                    self.client.abort_multipart_upload(**target, UploadId=upload_id)
+                except ClientError as error:
+                    if error.response["Error"]["Code"] != "NoSuchUpload":
+                        raise
 
     def copy(self, source, etag, target, sha256, content_type, *, immutable=True):
         return self.client.copy_object(

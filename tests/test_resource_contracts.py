@@ -74,6 +74,61 @@ class ResourceContracts(unittest.TestCase):
                 migration_candidate("kyou", self.root)
         self.assertEqual(self.s3.writes, [])
 
+    def kyou_plan(self, value, migration=False):
+        assets = []
+        for name in KYOU_FILES:
+            data = encode([value]) if name.endswith(".json") else f"value\n{value}\n".encode()
+            path = self.root / value / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            assets.append({"original": name, "logical": name, "size": len(data), "sha256": digest(data), "local": str(path)})
+        candidate = normalize("kyou", {"ok": True, "strategy": "top-batch", "charts_with_tags": 1, "charts_rows": 1}, assets, self.root / "metadata")
+        output = self.root / ("plan-" + value)
+        plan = prepare("kyou", candidate, output, migration=migration)
+        receipts = [upload_shard(plan, row["id"], output / f"shard-{row['id']}", output / f"receipt-{row['id']}.json") for row in plan["shards"]]
+        return plan, receipts
+
+    @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
+    def test_kyou_serialized_workflow_publishes_and_verifies_release(self):
+        finalize(*self.kyou_plan("base", migration=True))
+        plan, receipts = self.kyou_plan("updated")
+        result = finalize(plan, receipts)
+        pointer = json.loads(self.s3.objects["kyou/latest.json"]["Body"])
+        manifest = json.loads(self.s3.objects[pointer["manifestPath"]]["Body"])
+        self.assertEqual(pointer, result["pointer"])
+        self.assertEqual(pointer["resourceVersion"], plan["manifest"]["resourceVersion"])
+        self.assertEqual({row["name"] for row in manifest["files"]}, set(KYOU_FILES))
+        for item in manifest["files"]:
+            self.assertEqual(digest(self.s3.objects[item["path"]]["Body"]), item["sha256"])
+
+    @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
+    def test_kyou_refuses_pointer_update_outside_serialized_workflow(self):
+        finalize(*self.kyou_plan("base", migration=True))
+        original = self.s3.objects["kyou/latest.json"]["Body"]
+        plan, receipts = self.kyou_plan("updated")
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
+            with self.assertRaisesRegex(ValueError, "serialized master workflow"):
+                finalize(plan, receipts)
+        self.assertEqual(self.s3.objects["kyou/latest.json"]["Body"], original)
+
+    @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
+    def test_kyou_rechecks_baseline_after_manifest_write(self):
+        finalize(*self.kyou_plan("base", migration=True))
+        plan, receipts = self.kyou_plan("updated")
+        winner = self.s3.objects["kyou/latest.json"]["Body"] + b" "
+        complete = self.s3.complete_multipart_upload
+
+        def concurrent(**args):
+            result = complete(**args)
+            if args["Key"].startswith("kyou/manifests/"):
+                self.s3.seed("kyou/latest.json", winner)
+            return result
+
+        with patch.object(self.s3, "complete_multipart_upload", side_effect=concurrent):
+            with self.assertRaisesRegex(ValueError, "baseline changed"):
+                finalize(plan, receipts)
+        self.assertEqual(self.s3.objects["kyou/latest.json"]["Body"], winner)
+
     def test_rizline_preview_skip_requires_all_99_and_all_unindexed_after_replacement(self):
         from rizline_publisher.upstream import import_catalog
         for constants, indexed, success in [([99, 99], set(), True), ([99, 99], {"replacement"}, False), ([12, 99], set(), False)]:
