@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
+
+import paramiko
 
 from publisher.publication import finalize, prepare, upload_shard
 from publisher.resources import KYOU_FILES, migration_candidate, normalize
@@ -19,10 +21,25 @@ class ResourceContracts(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.s3 = S3()
-        for context in (patch.dict(os.environ, {"S3_ENDPOINT": "https://example.test", "S3_ACCESS_KEY_ID": "test", "S3_SECRET_ACCESS_KEY": "test", "S3_BUCKET_NAME": "rranker-rizline-data"}),
-                        patch("publisher.storage.boto3.client", return_value=self.s3)):
+        self.ssh = MagicMock()
+        self.ssh.__enter__.return_value = self.ssh
+        self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect = self.sftp_upload
+        host_key = paramiko.RSAKey.generate(1024)
+        for context in (patch.dict(os.environ, {"S3_ENDPOINT": "https://example.test", "S3_ACCESS_KEY_ID": "test", "S3_SECRET_ACCESS_KEY": "test", "S3_BUCKET_NAME": "rranker-rizline-data",
+                                               "SFTP_ENDPOINT": "sftp://storage.example:8022", "SFTP_HOST_KEY": f"{host_key.get_name()} {host_key.get_base64()}"}),
+                        patch("publisher.storage.boto3.client", return_value=self.s3),
+                        patch("paramiko.SSHClient", return_value=self.ssh),
+                        patch("publisher.storage.time.sleep")):
             context.start()
             self.addCleanup(context.stop)
+
+    def sftp_upload(self, source, path, **kwargs):
+        bucket, key = path.lstrip("/").split("/", 1)
+        if bucket != os.environ["S3_BUCKET_NAME"]:
+            raise ValueError("Wrong SFTP bucket")
+        data = source.read()
+        self.s3.seed(key, data)
+        self.s3.writes.append(("sftp", key, len(data)))
 
     def test_rizline_migration_uploads_only_rewritten_catalog(self):
         prefix = "rizline/releases/2026-09-20-2/"
@@ -99,7 +116,51 @@ class ResourceContracts(unittest.TestCase):
         self.assertEqual(pointer["resourceVersion"], plan["manifest"]["resourceVersion"])
         self.assertEqual({row["name"] for row in manifest["files"]}, set(KYOU_FILES))
         for item in manifest["files"]:
-            self.assertEqual(digest(self.s3.objects[item["path"]]["Body"]), item["sha256"])
+            row = self.s3.objects[item["path"]]
+            self.assertEqual(digest(row["Body"]), item["sha256"])
+            self.assertEqual(row["Metadata"]["sha256"], item["sha256"])
+            self.assertEqual(row["ContentType"], item["contentType"])
+            self.assertEqual(row["CacheControl"], "public,max-age=31536000,immutable")
+        self.assertEqual(self.s3.objects["kyou/latest.json"]["CacheControl"], "no-cache,no-store,must-revalidate")
+
+    @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
+    def test_kyou_sftp_authentication_failure_keeps_published_release(self):
+        finalize(*self.kyou_plan("base", migration=True))
+        original = copy.deepcopy(self.s3.objects)
+        self.ssh.connect.side_effect = paramiko.AuthenticationException("Authentication failed")
+        with self.assertRaises(paramiko.AuthenticationException):
+            self.kyou_plan("updated")
+        self.assertEqual(self.s3.objects, original)
+
+    @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
+    def test_kyou_sftp_metadata_failure_keeps_pointer_and_retry_repairs_metadata(self):
+        from botocore.exceptions import ClientError
+        finalize(*self.kyou_plan("base", migration=True))
+        original = self.s3.objects["kyou/latest.json"]["Body"]
+        self.s3.fail_key = f"kyou/data/{digest(encode(['updated']))}.json"
+        with self.assertRaises(ClientError):
+            self.kyou_plan("updated")
+        self.assertEqual(self.s3.objects["kyou/latest.json"]["Body"], original)
+        key = self.s3.fail_key
+        self.s3.fail_key = None
+        plan, receipts = self.kyou_plan("updated")
+        result = finalize(plan, receipts)
+        self.assertEqual(result["pointer"]["resourceVersion"], plan["manifest"]["resourceVersion"])
+        self.assertEqual(self.s3.objects[key]["Metadata"]["sha256"], digest(encode(["updated"])))
+        self.assertEqual(self.s3.objects[key]["CacheControl"], "public,max-age=31536000,immutable")
+
+    @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
+    def test_kyou_sftp_corruption_prevents_publication(self):
+        finalize(*self.kyou_plan("base", migration=True))
+        original = self.s3.objects["kyou/latest.json"]["Body"]
+        def corrupted(source, path, **kwargs):
+            self.sftp_upload(source, path, **kwargs)
+            key = path.lstrip("/").split("/", 1)[1]
+            self.s3.seed(key, b"corrupt")
+        self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect = corrupted
+        with self.assertRaisesRegex(ValueError, "verification failed"):
+            self.kyou_plan("updated")
+        self.assertEqual(self.s3.objects["kyou/latest.json"]["Body"], original)
 
     @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
     def test_kyou_refuses_pointer_update_outside_serialized_workflow(self):
@@ -116,15 +177,15 @@ class ResourceContracts(unittest.TestCase):
         finalize(*self.kyou_plan("base", migration=True))
         plan, receipts = self.kyou_plan("updated")
         winner = self.s3.objects["kyou/latest.json"]["Body"] + b" "
-        complete = self.s3.complete_multipart_upload
+        copy_object = self.s3.copy_object
 
         def concurrent(**args):
-            result = complete(**args)
+            result = copy_object(**args)
             if args["Key"].startswith("kyou/manifests/"):
                 self.s3.seed("kyou/latest.json", winner)
             return result
 
-        with patch.object(self.s3, "complete_multipart_upload", side_effect=concurrent):
+        with patch.object(self.s3, "copy_object", side_effect=concurrent):
             with self.assertRaisesRegex(ValueError, "baseline changed"):
                 finalize(plan, receipts)
         self.assertEqual(self.s3.objects["kyou/latest.json"]["Body"], winner)

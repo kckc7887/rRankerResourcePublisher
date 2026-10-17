@@ -67,7 +67,11 @@ class S3:
         if Key == self.fail_key:
             self.error(503)
         self.writes.append(("copy", Key, len(source["Body"])))
-        return {"CopyObjectResult": {"ETag": self.seed(Key, source["Body"], metadata=kwargs.get("Metadata"))}}
+        etag = self.seed(Key, source["Body"], metadata=kwargs.get("Metadata"))
+        for name in ("ContentType", "CacheControl"):
+            if name in kwargs:
+                self.objects[Key][name] = kwargs[name]
+        return {"CopyObjectResult": {"ETag": etag}}
 
     def create_multipart_upload(self, Bucket, Key, **kwargs):
         upload_id = uuid.uuid4().hex

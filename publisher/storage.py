@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -8,6 +9,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
@@ -148,16 +150,22 @@ class Storage:
         if sha256:
             args["Metadata"] = {"sha256": sha256}
         position = body.tell() if hasattr(body, "tell") else None
+        sftp = self._game == "kyou" and not (etag or absent)
         multipart = self._game == "kyou" and immutable and bool(sha256)
         for attempt in range(3):
             try:
+                if sftp:
+                    return self._sftp_put(args)
                 return self._multipart_put(args) if multipart else self.client.put_object(**args)["ETag"]
             except ClientError as error:
                 status = error.response["ResponseMetadata"]["HTTPStatusCode"]
-                if not (etag or absent or (immutable and sha256)) or status not in (404, 409, 412, 500, 502, 503, 504):
+                if not (sftp or etag or absent or (immutable and sha256)) or status not in (404, 409, 412, 500, 502, 503, 504):
                     raise
                 head = self.head(key)
-                if head and (absent or head["ETag"] != etag):
+                if head and (absent or head["ETag"] != etag) and (not sftp or (
+                    head.get("ContentType") == args["ContentType"] and head.get("CacheControl") == args["CacheControl"]
+                    and head.get("Metadata", {}) == args.get("Metadata", {})
+                )):
                     if position is None:
                         size, expected = len(body), digest(body)
                     else:
@@ -178,6 +186,35 @@ class Storage:
                 time.sleep(2 ** (attempt + 1))
                 if position is not None:
                     body.seek(position)
+
+    def _sftp_put(self, args):
+        import paramiko
+
+        endpoint = urlsplit(os.environ["SFTP_ENDPOINT"])
+        if endpoint.scheme != "sftp" or not endpoint.hostname:
+            raise ValueError("Invalid SFTP endpoint")
+        key_type, key_data = os.environ["SFTP_HOST_KEY"].split()[:2]
+        host_key = paramiko.PKey.from_type_string(key_type, base64.b64decode(key_data))
+        port = endpoint.port or 22
+        host = endpoint.hostname if port == 22 else f"[{endpoint.hostname}]:{port}"
+        source = args["Body"] if hasattr(args["Body"], "read") else io.BytesIO(args["Body"])
+        print(f"Uploading through SFTP: {args['Key']}", flush=True)
+        with paramiko.SSHClient() as ssh:
+            ssh.get_host_keys().add(host, host_key.get_name(), host_key)
+            ssh.connect(endpoint.hostname, port=port, username=os.environ["S3_ACCESS_KEY_ID"],
+                        password=os.environ["S3_SECRET_ACCESS_KEY"], allow_agent=False, look_for_keys=False,
+                        timeout=30, banner_timeout=30, auth_timeout=30)
+            with ssh.open_sftp() as sftp:
+                sftp.get_channel().settimeout(120)
+                sftp.putfo(source, f"/{self.bucket}/{args['Key']}", confirm=False)
+        head = self.head(args["Key"])
+        if head is None:
+            raise ValueError(f"SFTP upload is not readable: {args['Key']}")
+        return self.client.copy_object(
+            Bucket=self.bucket, Key=args["Key"], CopySource={"Bucket": self.bucket, "Key": args["Key"]},
+            CopySourceIfMatch=head["ETag"], MetadataDirective="REPLACE", Metadata=args.get("Metadata", {}),
+            ContentType=args["ContentType"], CacheControl=args["CacheControl"],
+        )["CopyObjectResult"]["ETag"]
 
     def _multipart_put(self, args):
         target = {name: args[name] for name in ("Bucket", "Key")}

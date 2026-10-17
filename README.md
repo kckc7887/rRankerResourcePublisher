@@ -40,7 +40,7 @@ Phigros 媒体项另存 `contentSha256`：PNG 校验像素、尺寸和图像元�
 
 全部分片完成内容校验后才能写清单、更新入口并回读。Phigros、Rizline 使用 ETag 条件更新；Kyou 只允许从 master 的 `kyou.yml` 提交入口，由 `resource-kyou` 串行锁隔离发布任务，提交前重新检查基线 ETag，再写入并回读。Kyou 不允许绕过该工作流并行提交入口。缺失回执、源 ETag 变化或基线冲突均拒绝提交。当前及上一版始终保留，其他清单从退役开始至少保留 7 天；清理仅删除未被保留清单引用且已超过保留期的哈希对象。
 
-内容哈希对象在上传前后校验，上传与桶内复制均按哈希地址写入。Kyou 通过桶域名请求，JSON 采用共享的紧凑 UTF-8 序列化，哈希对象使用分段上传，直接发送请求体；其他哈希对象遇到服务端写入错误时再改用分段上传，失败时中止未完成的分段。哈希对象或条件写入报错后，先检查目标对象；已写入且大小、SHA-256 一致时直接采用回读结果。基线仍一致时，对暂时性 404、409 和服务端错误最多再尝试两轮，文件流复位后重传。目标出现不同内容、基线消失或条件冲突时立即报错。
+内容哈希对象在上传前后校验，上传与桶内复制均按哈希地址写入。Kyou 通过 SFTP 上传资源、清单和入口，再通过 S3 桶内复制设置内容类型、缓存策略与摘要元数据；S3 读取沿用桶域名，JSON 使用共享的紧凑 UTF-8 序列化。SFTP 地址与 SSH 主机公钥分别来自 `S3_BUCKET_PHIGROS` 环境的 `SFTP_ENDPOINT`、`SFTP_HOST_KEY` Secret，后者采用 `类型 Base64公钥` 格式；登录复用现有 S3 凭据，主机身份不匹配时拒绝连接。其他哈希对象遇到服务端写入错误时改用分段上传，失败时中止未完成的分段。哈希对象或条件写入报错后，先检查目标对象；已写入且大小、SHA-256 一致时直接采用回读结果。基线仍一致时，对暂时性 404、409 和服务端错误最多再尝试两轮，文件流复位后重传。目标出现不同内容、基线消失或条件冲突时立即报错。
 
 ## 首次迁移
 
@@ -84,7 +84,7 @@ Phigros 内置工具源码保留 Copyright (C) 2026 Chnynnya 和 GPL-3.0-or-late
 
 Rizline 的 CRI UTF、AFS2、HCA 元数据核验参考 [vgmstream 固定提交](https://github.com/vgmstream/vgmstream/tree/e6afeaacf433bfafd38d873f80c94517e09d5b96) 中 `src/util/cri_utf.c`、`src/meta/awb.c`、`src/coding/libs/clhca.c`。完整 ISC 式许可与 Portions 归属保存在 [LICENSES/vgmstream-COPYING.txt](LICENSES/vgmstream-COPYING.txt)。保留 HCA 文件头的来源归属：nyaga 的反编译与 C++ 解码器、kode54 的 C 移植、bnnm 的整理与 HCA v3 分析、Thealexbarney 的 VGAudio 参考、Youjose 的 Ambisonics 信息。Python 实现只读元数据，不内嵌解码器；解码调用外部 vgmstream-cli，Actions 固定使用 r2117 并核验下载摘要，编码调用外部 FFmpeg。
 
-统计补充只读取 [rizline-tool 固定提交](https://github.com/limmy114/rizline-tool/blob/a7e1ae23aaae215c36710899af363bc71ae32634/index.html) 的 `songAllData` 数据字面量，不执行或复制其前端算法。该数据来源未提供独立代码许可证。依赖通过 pip 安装并保留分发包自带许可证；UnityPy 为 MIT，Pillow 为 MIT-CMU，boto3、requests、Playwright 为 Apache-2.0，fsb5 为 MIT。仓库不捆绑上述依赖和 FFmpeg 二进制。
+统计补充只读取 [rizline-tool 固定提交](https://github.com/limmy114/rizline-tool/blob/a7e1ae23aaae215c36710899af363bc71ae32634/index.html) 的 `songAllData` 数据字面量，不执行或复制其前端算法。该数据来源未提供独立代码许可证。依赖通过 pip 安装并保留分发包自带许可证；UnityPy 为 MIT，Pillow 为 MIT-CMU，boto3、requests、Playwright 为 Apache-2.0，fsb5 为 MIT，Paramiko 为 LGPL-2.1。仓库不捆绑上述依赖和 FFmpeg 二进制。
 
 ## 致谢
 

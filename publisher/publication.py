@@ -185,6 +185,11 @@ def finalize(plan, receipts):
             raise ValueError(f"Referenced object is missing: {key}")
         if key in verified_etags and head["ETag"] != verified_etags[key]:
             raise ValueError(f"Verified object changed: {key}")
+        if game == "kyou" and (head.get("Metadata", {}).get("sha256") != item["sha256"]
+                               or head.get("ContentType") != item["contentType"]
+                               or head.get("CacheControl") != "public,max-age=31536000,immutable"):
+            etag = storage.copy(key, head["ETag"], key, item["sha256"], item["contentType"])
+            storage.verify(key, item["size"], item["sha256"], etag)
     parallel(check, entries(game, plan["manifest"]))
     manifest = {**plan["manifest"], "publishedAt": plan["preparedAt"], "previousManifest": plan["previousManifest"]}
     if game == "phigros":
@@ -193,7 +198,10 @@ def finalize(plan, receipts):
     sha = digest(body)
     key = f"{game}/manifests/{sha}.json"
     head = storage.head(key)
-    if head is None:
+    if head is None or (game == "kyou" and (
+        head.get("Metadata", {}).get("sha256") != sha or head.get("ContentType") != "application/json"
+        or head.get("CacheControl") != "public,max-age=31536000,immutable"
+    )):
         storage.put(key, body, "application/json", sha256=sha, immutable=True)
     storage.verify(key, len(body), sha)
     pointer = {**plan["pointer"], "schemaVersion": 2, "resourceVersion": manifest["resourceVersion"],
