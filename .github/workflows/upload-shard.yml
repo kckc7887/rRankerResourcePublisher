@@ -14,6 +14,10 @@ on:
       attempt:
         type: string
         required: true
+    outputs:
+      cloud_fallback:
+        description: A storage upload needs the domestic runner
+        value: ${{ jobs.upload.outputs.cloud_fallback }}
 permissions:
   contents: read
 jobs:
@@ -21,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     timeout-minutes: 90
+    outputs:
+      cloud_fallback: ${{ steps.upload.outputs.cloud_fallback }}
     env:
       PYTHONUNBUFFERED: '1'
     steps:
@@ -39,7 +45,14 @@ jobs:
         with:
           name: ${{ inputs.game }}-shard-${{ inputs.shard }}-${{ inputs.attempt }}
           path: work/payload
-      - run: python -m publisher shard --plan work/publication/plan.json --shard "$SHARD" --payload work/payload --receipt "work/receipts/receipt-$SHARD.json"
+      - run: |
+          set +e
+          timeout --signal=TERM --kill-after=30s 75m python -m publisher shard --plan work/publication/plan.json --shard "$SHARD" --payload work/payload --receipt "work/receipts/receipt-$SHARD.json"
+          result=$?
+          if [ "$result" = 124 ]; then printf 'cloud_fallback=true\n' >> "$GITHUB_OUTPUT"; fi
+          exit "$result"
+        id: upload
+        continue-on-error: true
         env:
           SHARD: ${{ inputs.shard }}
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
@@ -48,7 +61,11 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           SFTP_ENDPOINT: ${{ secrets.SFTP_ENDPOINT }}
           SFTP_HOST_KEY: ${{ secrets.SFTP_HOST_KEY }}
+      - name: Fail invalid resource uploads
+        if: steps.upload.outcome == 'failure' && steps.upload.outputs.cloud_fallback != 'true'
+        run: exit 1
       - uses: actions/upload-artifact@v7
+        if: steps.upload.outcome == 'success'
         with:
           name: ${{ inputs.game }}-receipt-${{ inputs.shard }}-${{ inputs.attempt }}
           overwrite: true

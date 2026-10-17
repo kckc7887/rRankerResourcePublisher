@@ -7,7 +7,13 @@ from pathlib import Path
 
 from .publication import finalize, garbage_collect, prepare, upload_shard
 from .resources import local_candidate, migration_candidate
-from .storage import encode
+from .storage import encode, recoverable_upload_error
+
+
+def cloud_fallback_output():
+    if path := os.environ.get("GITHUB_OUTPUT"):
+        with open(path, "a", encoding="utf-8") as output:
+            output.write("cloud_fallback=true\n")
 
 
 def main():
@@ -49,6 +55,8 @@ def main():
         except DxtagIncomplete as error:
             result = error.result
             failed = True
+            if all(row.get("stage") == "upload" for row in result["failed"]):
+                cloud_fallback_output()
     elif args.command in ("prepare", "migrate"):
         migration = args.command == "migrate"
         candidate = migration_candidate(args.game, args.output / "metadata") if migration else local_candidate(args.game, args.input, args.output / "metadata")
@@ -61,14 +69,20 @@ def main():
                 output.write(f"shards={len(plan['shards'])}\n")
                 output.write(f"unchanged={str(plan['unchanged']).lower()}\n")
                 output.write(f"attempt={os.environ.get('GITHUB_RUN_ATTEMPT', '1')}\n")
-    elif args.command == "shard":
-        result = upload_shard(json.loads(args.plan.read_bytes()), args.shard, args.payload, args.receipt)
-    elif args.command == "finalize":
-        result = finalize(json.loads(args.plan.read_bytes()), [json.loads(path.read_bytes()) for path in args.receipts.glob("**/receipt-*.json")])
-    elif args.command == "publish-plan":
-        plan = json.loads(args.plan.read_bytes())
-        receipts = [upload_shard(plan, row["id"], args.payload / f"shard-{row['id']}", args.payload / f"receipt-{row['id']}.json") for row in plan["shards"]]
-        result = finalize(plan, receipts)
+    elif args.command in ("shard", "finalize", "publish-plan"):
+        try:
+            if args.command == "shard":
+                result = upload_shard(json.loads(args.plan.read_bytes()), args.shard, args.payload, args.receipt)
+            elif args.command == "finalize":
+                result = finalize(json.loads(args.plan.read_bytes()), [json.loads(path.read_bytes()) for path in args.receipts.glob("**/receipt-*.json")])
+            else:
+                plan = json.loads(args.plan.read_bytes())
+                receipts = [upload_shard(plan, row["id"], args.payload / f"shard-{row['id']}", args.payload / f"receipt-{row['id']}.json") for row in plan["shards"]]
+                result = finalize(plan, receipts)
+        except Exception as error:
+            if recoverable_upload_error(error):
+                cloud_fallback_output()
+            raise
     else:
         result = garbage_collect(args.game, execute=args.execute)
     print(encode(result).decode(), end="")

@@ -28,6 +28,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       shards: ${{ steps.plan.outputs.shards }}
       attempt: ${{ steps.plan.outputs.attempt }}
+      cloud_fallback: ${{ steps.publish.outputs.cloud_fallback }}
     env:
       GAME: ${{ inputs.game }}
       S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
@@ -96,11 +97,86 @@ jobs:
           path: work/publication/plan.json
           if-no-files-found: error
           retention-days: 90
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 0
+        with:
+          name: ${{ inputs.game }}-shard-0-${{ github.run_attempt }}
+          path: work/publication/shard-0
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 1
+        with:
+          name: ${{ inputs.game }}-shard-1-${{ github.run_attempt }}
+          path: work/publication/shard-1
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 2
+        with:
+          name: ${{ inputs.game }}-shard-2-${{ github.run_attempt }}
+          path: work/publication/shard-2
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 3
+        with:
+          name: ${{ inputs.game }}-shard-3-${{ github.run_attempt }}
+          path: work/publication/shard-3
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 4
+        with:
+          name: ${{ inputs.game }}-shard-4-${{ github.run_attempt }}
+          path: work/publication/shard-4
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 5
+        with:
+          name: ${{ inputs.game }}-shard-5-${{ github.run_attempt }}
+          path: work/publication/shard-5
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 6
+        with:
+          name: ${{ inputs.game }}-shard-6-${{ github.run_attempt }}
+          path: work/publication/shard-6
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        if: inputs.execute && fromJSON(steps.plan.outputs.shards) > 7
+        with:
+          name: ${{ inputs.game }}-shard-7-${{ github.run_attempt }}
+          path: work/publication/shard-7
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
       - name: Publish Kyou
+        id: publish
         if: inputs.execute && inputs.game == 'kyou'
+        continue-on-error: true
         run: |
-          python -m publisher publish-plan --plan work/publication/plan.json --payload work/publication
-          python -m publisher gc kyou --execute
+          set +e
+          timeout --signal=TERM --kill-after=30s 60m python -m publisher publish-plan --plan work/publication/plan.json --payload work/publication
+          result=$?
+          if [ "$result" = 124 ]; then printf 'cloud_fallback=true\n' >> "$GITHUB_OUTPUT"; fi
+          exit "$result"
+      - name: Fail invalid Kyou publications
+        if: steps.publish.outcome == 'failure' && steps.publish.outputs.cloud_fallback != 'true'
+        run: exit 1
+      - name: Clean up retired Kyou objects
+        if: steps.publish.outcome == 'success'
+        run: python -m publisher gc kyou --execute
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -113,70 +189,6 @@ jobs:
             work/publication/receipt-*.json
           if-no-files-found: ignore
           retention-days: 90
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 0
-        with:
-          name: ${{ inputs.game }}-shard-0-${{ github.run_attempt }}
-          path: work/publication/shard-0
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 1
-        with:
-          name: ${{ inputs.game }}-shard-1-${{ github.run_attempt }}
-          path: work/publication/shard-1
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 2
-        with:
-          name: ${{ inputs.game }}-shard-2-${{ github.run_attempt }}
-          path: work/publication/shard-2
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 3
-        with:
-          name: ${{ inputs.game }}-shard-3-${{ github.run_attempt }}
-          path: work/publication/shard-3
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 4
-        with:
-          name: ${{ inputs.game }}-shard-4-${{ github.run_attempt }}
-          path: work/publication/shard-4
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 5
-        with:
-          name: ${{ inputs.game }}-shard-5-${{ github.run_attempt }}
-          path: work/publication/shard-5
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 6
-        with:
-          name: ${{ inputs.game }}-shard-6-${{ github.run_attempt }}
-          path: work/publication/shard-6
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-      - uses: actions/upload-artifact@v7
-        if: inputs.execute && inputs.game != 'kyou' && fromJSON(steps.plan.outputs.shards) > 7
-        with:
-          name: ${{ inputs.game }}-shard-7-${{ github.run_attempt }}
-          path: work/publication/shard-7
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
   upload:
     needs: prepare
     if: inputs.execute && inputs.game != 'kyou' && fromJSON(needs.prepare.outputs.shards) > 0
@@ -193,10 +205,12 @@ jobs:
     secrets: inherit
   finalize:
     needs: [prepare, upload]
-    if: ${{ !cancelled() && inputs.execute && inputs.game != 'kyou' && needs.prepare.result == 'success' && (needs.upload.result == 'success' || needs.upload.result == 'skipped') }}
+    if: ${{ !cancelled() && inputs.execute && inputs.game != 'kyou' && needs.prepare.result == 'success' && needs.upload.outputs.cloud_fallback != 'true' && (needs.upload.result == 'success' || needs.upload.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     timeout-minutes: 30
+    outputs:
+      cloud_fallback: ${{ steps.publish.outputs.cloud_fallback }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -216,9 +230,14 @@ jobs:
           path: work/receipts
           merge-multiple: true
       - name: Verify complete publication and switch pointer
+        id: publish
+        continue-on-error: true
         run: |
-          python -m publisher finalize --plan work/publication/plan.json --receipts work/receipts
-          python -m publisher gc "$GAME" --execute
+          set +e
+          timeout --signal=TERM --kill-after=30s 20m python -m publisher finalize --plan work/publication/plan.json --receipts work/receipts
+          result=$?
+          if [ "$result" = 124 ]; then printf 'cloud_fallback=true\n' >> "$GITHUB_OUTPUT"; fi
+          exit "$result"
         env:
           GAME: ${{ inputs.game }}
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
@@ -227,3 +246,37 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           SFTP_ENDPOINT: ${{ secrets.SFTP_ENDPOINT }}
           SFTP_HOST_KEY: ${{ secrets.SFTP_HOST_KEY }}
+      - name: Fail invalid resource publications
+        if: steps.publish.outcome == 'failure' && steps.publish.outputs.cloud_fallback != 'true'
+        run: exit 1
+      - name: Clean up retired resources
+        if: steps.publish.outcome == 'success'
+        env:
+          GAME: ${{ inputs.game }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: python -m publisher gc "$GAME" --execute
+  cloud-fallback:
+    needs: [prepare, upload, finalize]
+    if: ${{ !cancelled() && inputs.execute && needs.prepare.result == 'success' && (needs.prepare.outputs.cloud_fallback == 'true' || (needs.upload.result == 'success' && needs.upload.outputs.cloud_fallback == 'true') || needs.finalize.outputs.cloud_fallback == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 125
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python -m pip install 'boto3>=1.40,<2' 'paramiko>=5,<6' 'requests>=2.32,<3'
+      - name: Retry the same publication through Yunxiao
+        env:
+          GAME: ${{ inputs.game }}
+          PUBLICATION_ATTEMPT: ${{ needs.prepare.outputs.attempt }}
+          YUNXIAO_ENDPOINT: ${{ vars.YUNXIAO_ENDPOINT }}
+          YUNXIAO_PHIGROS_PIPELINE_ID: ${{ vars.YUNXIAO_PHIGROS_PIPELINE_ID }}
+          YUNXIAO_RIZLINE_PIPELINE_ID: ${{ vars.YUNXIAO_RIZLINE_PIPELINE_ID }}
+          YUNXIAO_TOKEN: ${{ secrets.YUNXIAO_TOKEN }}
+        run: python -m publisher.yunxiao dispatch "$GAME" --attempt "$PUBLICATION_ATTEMPT" --timeout-minutes 120

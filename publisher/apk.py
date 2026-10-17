@@ -98,7 +98,8 @@ def publish(release_id, output, *, bootstrap=False, execute=False):
                 source = {"key": source_key, "etag": etag}
                 path.write_bytes(data)
             else:
-                with requests.get(asset["browser_download_url"], stream=True, timeout=(30, 300)) as response:
+                url = os.environ.get("APK_DOWNLOAD_PREFIX", "") + asset["browser_download_url"]
+                with requests.get(url, stream=True, timeout=(30, 300)) as response:
                     response.raise_for_status()
                     with path.open("wb") as file:
                         for chunk in response.iter_content(4 * 1024 * 1024):

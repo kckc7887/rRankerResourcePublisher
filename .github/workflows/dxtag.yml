@@ -52,6 +52,8 @@ jobs:
         working-directory: DXTag
         run: npm ci && npm run build
       - name: Fill missing DXTag charts and publish full library
+        id: publish
+        continue-on-error: true
         env:
           EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute }}
           DXTAG_ROOT: ${{ github.workspace }}/DXTag
@@ -65,3 +67,23 @@ jobs:
           args=()
           if [ "$EXECUTE" = true ]; then args+=(--execute); fi
           python -m publisher dxtag --output work/dxtag "${args[@]}"
+      - name: Fail invalid DXTag publications
+        if: steps.publish.outcome == 'failure' && steps.publish.outputs.cloud_fallback != 'true'
+        run: exit 1
+      - uses: actions/upload-artifact@v7
+        if: steps.publish.outputs.cloud_fallback == 'true'
+        with:
+          name: dxtag-prepared-${{ github.run_attempt }}
+          path: |
+            work/dxtag/plan.json
+            work/dxtag/payload
+          if-no-files-found: error
+          retention-days: 3
+      - name: Retry prepared DXTag uploads through Yunxiao
+        if: steps.publish.outputs.cloud_fallback == 'true'
+        env:
+          PUBLICATION_ATTEMPT: ${{ github.run_attempt }}
+          YUNXIAO_ENDPOINT: ${{ vars.YUNXIAO_ENDPOINT }}
+          YUNXIAO_MAIMAI_PIPELINE_ID: ${{ vars.YUNXIAO_MAIMAI_PIPELINE_ID }}
+          YUNXIAO_TOKEN: ${{ secrets.YUNXIAO_TOKEN }}
+        run: python -m publisher.yunxiao dispatch dxtag --attempt "$PUBLICATION_ATTEMPT" --timeout-minutes 120

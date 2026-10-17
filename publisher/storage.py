@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 CATEGORIES = {
     "phigros": {"avatars", "charts", "illustrations", "illustrations-blur", "illustrations-lowres", "music", "metadata"},
@@ -36,6 +36,17 @@ def digest(data):
 def file_digest(path):
     with Path(path).open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def recoverable_upload_error(error):
+    import paramiko
+
+    if isinstance(error, ClientError):
+        status = error.response["ResponseMetadata"]["HTTPStatusCode"]
+        return status in (404, 408, 409, 429) or status >= 500
+    if isinstance(error, (FileNotFoundError, PermissionError)):
+        return False
+    return isinstance(error, (BotoCoreError, paramiko.SSHException, OSError, EOFError))
 
 
 def safe_path(key):

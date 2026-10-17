@@ -104,6 +104,28 @@ class ApkTests(unittest.TestCase):
         result = publish(123, self.root, bootstrap=True, execute=True)
         self.assertEqual(len(result["completed"]), 4)
 
+    def test_public_download_proxy_preserves_integrity_and_does_not_receive_credentials(self):
+        payloads = {}
+        for abi, name in ABI_NAMES.items():
+            asset = next(row for row in self.release["assets"] if row["name"].endswith(f"-{name}.apk"))
+            asset["name"] = f"rRanker-{name}.apk"
+            asset["browser_download_url"] = f"https://release.example/{name}.apk"
+            payloads[f"https://proxy.example/{asset['browser_download_url']}"] = apk_bytes(abi)
+        def download(url, **kwargs):
+            self.assertNotIn("headers", kwargs)
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.iter_content.return_value = [payloads[url]]
+            return response
+        with patch.dict(os.environ, {"APK_DOWNLOAD_PREFIX": "https://proxy.example/", "GH_TOKEN": "private-github-token"}), \
+                patch("publisher.apk.requests.get", side_effect=download):
+            self.assertEqual(publish(123, self.root, execute=True)["status"], "published")
+            original = copy.deepcopy(self.s3.objects)
+            payloads["https://proxy.example/https://release.example/x86_64.apk"] = b"changed"
+            with self.assertRaisesRegex(ValueError, "checksum/size"):
+                publish(123, self.root, execute=True)
+        self.assertEqual(self.s3.objects, original)
+
     def test_rejects_draft_prerelease_and_delayed_old_release(self):
         for field in ("draft", "prerelease"):
             self.release[field] = True

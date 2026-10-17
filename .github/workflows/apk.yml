@@ -31,7 +31,16 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install 'boto3>=1.40,<2' 'paramiko>=5,<6' 'requests>=2.32,<3'
+      - name: Publish formal APKs through Yunxiao
+        if: ${{ !inputs.bootstrap }}
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          YUNXIAO_ENDPOINT: ${{ vars.YUNXIAO_ENDPOINT }}
+          YUNXIAO_APK_PIPELINE_ID: ${{ vars.YUNXIAO_APK_PIPELINE_ID }}
+          YUNXIAO_TOKEN: ${{ secrets.YUNXIAO_TOKEN }}
+        run: python -m publisher.yunxiao dispatch apk --release-id "$RELEASE_ID"
       - name: Verify all APKs and publish fixed addresses
+        if: inputs.bootstrap
         env:
           RELEASE_ID: ${{ inputs.release_id }}
           BOOTSTRAP: ${{ inputs.bootstrap }}
@@ -50,7 +59,7 @@ jobs:
           fi
           python -m publisher.apk "$RELEASE_ID" "${args[@]}" --execute
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && inputs.bootstrap
         with:
           name: apk-publication-${{ github.run_attempt }}
           path: work/apk/report.json

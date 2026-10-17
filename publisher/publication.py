@@ -148,7 +148,7 @@ def upload_shard(plan, shard_id, payload, receipt):
     return result
 
 
-def finalize(plan, receipts):
+def finalize(plan, receipts, *, github_workflow=None):
     game = plan["game"]
     storage = Storage(game)
     if storage.bucket != plan["bucket"]:
@@ -169,8 +169,10 @@ def finalize(plan, receipts):
     if (latest["etag"] if latest else None) != plan["baselineEtag"]:
         raise ValueError("Publication baseline changed; refusing pointer update")
     if game == "kyou":
-        workflow = f"{os.environ.get('GITHUB_REPOSITORY')}/.github/workflows/kyou.yml@refs/heads/master"
-        if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_WORKFLOW_REF") != workflow:
+        repository = os.environ.get("GITHUB_REPOSITORY") if github_workflow is None else "kckc7887/rRankerResourcePublisher"
+        workflow = f"{repository}/.github/workflows/kyou.yml@refs/heads/master"
+        origin = github_workflow or (os.environ.get("GITHUB_WORKFLOW_REF") if os.environ.get("GITHUB_ACTIONS") == "true" else None)
+        if origin != workflow:
             raise ValueError("Kyou pointer updates require the serialized master workflow")
     def check_source(source):
         head = storage.head(source["key"])

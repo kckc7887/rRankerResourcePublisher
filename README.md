@@ -16,6 +16,50 @@
 
 各 Environment 提供变量 `S3_BUCKET_NAME` 和 Secrets `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`；仓库 Secrets 为 `S3_ENDPOINT`、`SFTP_ENDPOINT`、`SFTP_HOST_KEY`。Phigros 与 Kyou 使用同一桶、独立资源组。`S3_BUCKET_MAIMAI` 的桶名是 `rranker-maimai-data`。所有删除均依据具体哈希对象，不执行桶根同步。
 
+### 云效上传
+
+正式 Release 的 `published` 事件经本体的 `resource-release.yml` 调用本仓库 `apk.yml`，由云效下载、校验并上传 APK。Phigros、Rizline、Kyou、DXTag 保留 GitHub 上的解析和上传；存储连接中断、404、408、409、429、5xx 或资源上传超时时，才把已准备的同一份产物交给云效。解析失败、摘要错误、基线冲突、取消和清理失败不会触发备用上传。GitHub 等待云效实际结束；失败继续报错，等待超时或取消时请求停止对应云效运行。
+
+发布仓库配置以下 Actions 变量和 Secret：
+
+| 配置 | 内容 |
+| --- | --- |
+| `YUNXIAO_ENDPOINT` | 云效 Region 实例的 HTTPS 地址 |
+| `YUNXIAO_APK_PIPELINE_ID` | APK 流水线 ID |
+| `YUNXIAO_PHIGROS_PIPELINE_ID` | Phigros、Kyou 共用的流水线 ID |
+| `YUNXIAO_RIZLINE_PIPELINE_ID` | Rizline 流水线 ID |
+| `YUNXIAO_MAIMAI_PIPELINE_ID` | DXTag 流水线 ID |
+| Secret `YUNXIAO_TOKEN` | 仅授予“流水线 → 流水线运行实例”读写权限的个人访问令牌 |
+
+云效按桶设置流水线，关闭代码提交、定时和 Webhook 触发，使用杭州公共构建集群和 `public.ecr.aws/docker/library/python:3.13-slim-bookworm` 镜像，关闭自动下载代码。APK 任务超时 80 分钟，资源任务 110 分钟。Phigros/Kyou 流水线允许两个运行实例及两个同任务并发；其余流水线均为 1，超过限制时拒绝新运行。各资源组的 GitHub 串行锁贯穿云效执行，同一资源组不并行更新入口。
+
+云效运行变量开放 `GAME`、`PUBLISHER_SHA`、`SOURCE_RUN_ID`，APK 另开放 `RELEASE_ID`，资源另开放 `PUBLICATION_ATTEMPT`。GitHub 只传这些公开标识。每条流水线的 `S3_BUCKET_NAME` 固定为对应桶；S3 地址、访问密钥，以及资源使用的 `SFTP_ENDPOINT`、`SFTP_HOST_KEY` 保存为该流水线私密变量，不开放运行时输入。资源流水线还需私密变量 `GITHUB_ARTIFACT_TOKEN`，对应仅限本仓库、Actions 只读权限的 GitHub fine-grained token；它只用于读取运行和下载产物，下载重定向不携带令牌。APK 的公开附件可设置普通变量 `APK_DOWNLOAD_PREFIX=https://gh-proxy.org/`，所有大小、摘要与 APK 校验仍在写入前执行。
+
+各云效任务使用以下执行命令，按 GitHub 传入的提交下载发布代码：
+
+```sh
+set -eu
+python - <<'PY'
+import os
+import re
+import urllib.request
+
+sha = os.environ["PUBLISHER_SHA"]
+if not re.fullmatch(r"[0-9a-f]{40}", sha):
+    raise ValueError("Invalid publisher commit")
+urllib.request.urlretrieve(
+    f"https://codeload.github.com/kckc7887/rRankerResourcePublisher/tar.gz/{sha}",
+    "/tmp/publisher.tar.gz",
+)
+PY
+mkdir -p /tmp/publisher
+tar -xzf /tmp/publisher.tar.gz --strip-components=1 -C /tmp/publisher
+cd /tmp/publisher
+bash .github/scripts/yunxiao-upload.sh
+```
+
+资源备用上传读取原运行的计划和分片产物，核对 GitHub 产物摘要、来源工作流、提交和仍在运行的状态，沿用原对象校验、回执、基线与入口提交。DXTag 使用已算好的文件补传，不重新评分。云效只负责上传，无需安装抓取浏览器、媒体解析工具或 DXTag 构建环境。API 使用云效的[运行](https://help.aliyun.com/zh/yunxiao/developer-reference/createpipelinerun)、[查询](https://help.aliyun.com/zh/yunxiao/developer-reference/getpipelinerun)及[停止运行](https://help.aliyun.com/zh/yunxiao/developer-reference/updatepipelinerun)接口。
+
 ## 对象与合同
 
 每组的 `<组名>/latest.json` 使用 schemaVersion 2，指向 `manifests/<sha256>.json` 并携带 `manifestSha256`、`resourceVersion`、`publishedAt`。清单记录 `previousManifest`、发布时间和完整资源集合。

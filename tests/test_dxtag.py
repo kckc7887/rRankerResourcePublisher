@@ -13,6 +13,7 @@ from botocore.exceptions import ClientError
 
 from publisher.__main__ import main
 from publisher.dxtag import SONG_LIST_URL
+from publisher.dxtag import publish_prepared
 from test_publication import S3, sftp_mock
 
 AXES = ("键盘", "星星", "技巧", "体力", "爆发")
@@ -210,6 +211,44 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["uploaded"], [])
         self.assertEqual(self.s3.writes, [])
+
+    def test_storage_failure_keeps_prepared_scores_for_cloud_retry(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        self.s3.fail_key = "DXTag/8.json"
+        output = self.root / "github-output"
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), patch("publisher.storage.time.sleep"):
+            code, result = self.publish("--execute")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["failed"][0]["stage"], "upload")
+        self.assertIn("cloud_fallback=true", output.read_text(encoding="utf-8"))
+        self.assertNotIn("DXTag/all.json", self.s3.objects)
+        self.s3.fail_key = None
+        self.absent.add(8)
+        retried = publish_prepared(self.root / "plan.json")
+        self.assertEqual(retried["completed"], [8])
+        self.assertEqual(self.s3.objects["DXTag/8.json"]["Metadata"]["sha256"], json.loads((self.root / "plan.json").read_bytes())["objects"][0]["sha256"])
+        self.assertIn("8", json.loads(self.s3.objects["DXTag/all.json"]["Body"]))
+
+    def test_score_failure_is_not_eligible_for_cloud_retry(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        self.chart_bytes[8] = b"fail"
+        output = self.root / "github-output"
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+            code, result = self.publish("--execute")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["failed"][0]["stage"], "prepare")
+        self.assertFalse(output.exists())
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            publish_prepared(self.root / "plan.json")
+
+    def test_changed_prepared_scores_cannot_replace_the_library(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        self.assertEqual(self.publish("--execute")[0], 0)
+        previous = self.s3.objects["DXTag/all.json"]["Body"]
+        (self.root / "payload/DXTag/8.json").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "payload changed"):
+            publish_prepared(self.root / "plan.json")
+        self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
 
     def test_unsupported_song_id_writes_nothing(self):
         self.catalog = {"songs": [{"id": 20000, "difficulties": {"standard": [{}], "dx": []}}]}

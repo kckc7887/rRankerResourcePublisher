@@ -160,6 +160,18 @@ class ResourceContracts(unittest.TestCase):
                 finalize(plan, receipts)
         self.assertEqual(self.s3.objects["kyou/latest.json"]["Body"], original)
 
+    @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "false"})
+    def test_kyou_cloud_publication_requires_the_verified_own_master_origin(self):
+        plan, receipts = self.kyou_plan("base", migration=True)
+        origin = "kckc7887/rRankerResourcePublisher/.github/workflows/kyou.yml@refs/heads/master"
+        result = finalize(plan, receipts, github_workflow=origin)
+        self.assertEqual(json.loads(self.s3.objects["kyou/latest.json"]["Body"]), result["pointer"])
+        original = self.s3.objects["kyou/latest.json"]["Body"]
+        plan, receipts = self.kyou_plan("updated")
+        with self.assertRaisesRegex(ValueError, "serialized master workflow"):
+            finalize(plan, receipts, github_workflow=origin.replace("refs/heads/master", "refs/heads/other"))
+        self.assertEqual(self.s3.objects["kyou/latest.json"]["Body"], original)
+
     @patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "example/publisher", "GITHUB_WORKFLOW_REF": "example/publisher/.github/workflows/kyou.yml@refs/heads/master"})
     def test_kyou_rechecks_baseline_after_manifest_write(self):
         finalize(*self.kyou_plan("base", migration=True))
