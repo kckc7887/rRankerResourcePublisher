@@ -40,6 +40,7 @@
 ```sh
 set -eu
 python - <<'PY'
+import json
 import os
 import re
 import urllib.request
@@ -47,6 +48,11 @@ import urllib.request
 sha = os.environ["PUBLISHER_SHA"]
 if not re.fullmatch(r"[0-9a-f]{40}", sha):
     raise ValueError("Invalid publisher commit")
+with urllib.request.urlopen(
+    f"https://api.github.com/repos/kckc7887/rRankerResourcePublisher/compare/{sha}...master", timeout=30,
+) as response:
+    if json.load(response)["status"] not in ("ahead", "identical"):
+        raise ValueError("Publisher commit is not on master")
 urllib.request.urlretrieve(
     f"https://codeload.github.com/kckc7887/rRankerResourcePublisher/tar.gz/{sha}",
     "/tmp/publisher.tar.gz",
