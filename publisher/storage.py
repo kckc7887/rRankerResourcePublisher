@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
@@ -74,8 +75,27 @@ def parallel(function, items, workers=8):
         return list(pool.map(function, items))
 
 
+def _upload_progress(protocol, key, size):
+    started = time.monotonic()
+    reported = started - 10
+    def report(sent):
+        nonlocal reported
+        now = time.monotonic()
+        if sent != size and now - reported < 10:
+            return
+        elapsed = now - started
+        percent = sent * 100 / size if size else 100
+        speed = sent / max(elapsed, 0.001) / 1024
+        print(f"{protocol} sent {key}: {sent}/{size} bytes ({percent:.1f}%), {speed:.1f} KiB/s, {elapsed:.1f}s",
+              file=sys.stderr, flush=True)
+        reported = now
+    report(0)
+    return report
+
+
 class Storage:
     def __init__(self, game):
+        self._game = game
         self.bucket = os.environ["S3_BUCKET_NAME"]
         if self.bucket != BUCKETS[game]:
             raise ValueError(f"Wrong bucket for {game}")
@@ -148,6 +168,8 @@ class Storage:
         position = body.tell() if hasattr(body, "tell") else None
         for attempt in range(3):
             try:
+                if self._game == "apk":
+                    return self._s3_put(args)
                 return self._sftp_put(args)
             except ClientError as error:
                 status = error.response["ResponseMetadata"]["HTTPStatusCode"]
@@ -177,6 +199,35 @@ class Storage:
                 if position is not None:
                     body.seek(position)
 
+    def _s3_put(self, args):
+        body = args["Body"]
+        if hasattr(body, "name"):
+            source = Path(body.name).open("rb")
+            source.seek(body.tell())
+        else:
+            source = io.BytesIO(body.read() if hasattr(body, "read") else body)
+        with source:
+            position = source.tell()
+            source.seek(0, 2)
+            size = source.tell() - position
+            source.seek(position)
+            progress = _upload_progress("S3", args["Key"], size)
+            sent = 0
+            def advance(count):
+                nonlocal sent
+                sent += count
+                progress(sent)
+            self.client.upload_fileobj(
+                source, self.bucket, args["Key"], Callback=advance,
+                ExtraArgs={name: args[name] for name in ("ContentType", "CacheControl", "Metadata") if name in args},
+                Config=TransferConfig(multipart_threshold=size + 1, use_threads=False, preferred_transfer_client="classic"),
+            )
+        print(f"S3 PUT acknowledged: {args['Key']}", file=sys.stderr, flush=True)
+        head = self.head(args["Key"])
+        if head is None:
+            raise ValueError(f"S3 upload is not readable: {args['Key']}")
+        return head["ETag"]
+
     def _sftp_put(self, args):
         import paramiko
 
@@ -188,6 +239,10 @@ class Storage:
         port = endpoint.port or 22
         host = endpoint.hostname if port == 22 else f"[{endpoint.hostname}]:{port}"
         source = args["Body"] if hasattr(args["Body"], "read") else io.BytesIO(args["Body"])
+        position = source.tell()
+        source.seek(0, 2)
+        size = source.tell() - position
+        source.seek(position)
         print(f"Uploading through SFTP: {args['Key']}", file=sys.stderr, flush=True)
         with paramiko.SSHClient() as ssh:
             ssh.get_host_keys().add(host, host_key.get_name(), host_key)
@@ -196,15 +251,20 @@ class Storage:
                         timeout=30, banner_timeout=30, auth_timeout=30)
             with ssh.open_sftp() as sftp:
                 sftp.get_channel().settimeout(120)
-                sftp.putfo(source, f"/{self.bucket}/{args['Key']}", confirm=False)
+                progress = _upload_progress("SFTP", args["Key"], size)
+                sftp.putfo(source, f"/{self.bucket}/{args['Key']}", file_size=size,
+                           callback=lambda sent, total: progress(sent), confirm=False)
+        print(f"SFTP transfer acknowledged: {args['Key']}; updating S3 metadata", file=sys.stderr, flush=True)
         head = self.head(args["Key"])
         if head is None:
             raise ValueError(f"SFTP upload is not readable: {args['Key']}")
-        return self.client.copy_object(
+        etag = self.client.copy_object(
             Bucket=self.bucket, Key=args["Key"], CopySource={"Bucket": self.bucket, "Key": args["Key"]},
             CopySourceIfMatch=head["ETag"], MetadataDirective="REPLACE", Metadata=args.get("Metadata", {}),
             ContentType=args["ContentType"], CacheControl=args["CacheControl"],
         )["CopyObjectResult"]["ETag"]
+        print(f"S3 metadata updated: {args['Key']}", file=sys.stderr, flush=True)
+        return etag
 
     def copy(self, source, etag, target, sha256, content_type, *, immutable=True):
         return self.client.copy_object(

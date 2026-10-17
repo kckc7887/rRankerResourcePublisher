@@ -2,7 +2,7 @@ import copy
 import io
 import json
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -57,6 +57,16 @@ class S3:
             if name in kwargs:
                 self.objects[Key][name] = kwargs[name]
         return {"CopyObjectResult": {"ETag": etag}}
+
+    def upload_fileobj(self, Fileobj, Bucket, Key, ExtraArgs, Callback, Config):
+        if Key == self.fail_key:
+            self.error(503)
+        data = Fileobj.read()
+        Callback(len(data))
+        self.writes.append(("put", Key, len(data)))
+        self.seed(Key, data, metadata=ExtraArgs.get("Metadata"))
+        for name in ("ContentType", "CacheControl"):
+            self.objects[Key][name] = ExtraArgs[name]
 
     def get_paginator(self, operation):
         return self
@@ -271,6 +281,24 @@ class PublicationTests(unittest.TestCase):
                 storage.put("phigros/latest.json", b"changed", "application/json", **condition)
             self.assertEqual(caught.exception.response["ResponseMetadata"]["HTTPStatusCode"], 412)
         self.assertEqual(self.s3.objects, original)
+
+    def test_upload_progress_reports_bytes_percent_and_speed(self):
+        clock = [0]
+        upload = self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect
+        def transfer(source, path, **kwargs):
+            for elapsed, sent in ((1, 3), (11, 7), (12, 10)):
+                clock[0] = elapsed
+                kwargs["callback"](sent, kwargs["file_size"])
+            upload(source, path)
+        self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect = transfer
+        output = io.StringIO()
+        with patch("publisher.storage.time.monotonic", side_effect=lambda: clock[0]), redirect_stderr(output):
+            storage = Storage("phigros")
+            etag = storage.put("phigros/data.bin", b"0123456789", "application/octet-stream")
+            storage.verify("phigros/data.bin", 10, digest(b"0123456789"), etag)
+        self.assertIn("7/10 bytes (70.0%)", output.getvalue())
+        self.assertIn("10/10 bytes (100.0%)", output.getvalue())
+        self.assertIn("KiB/s", output.getvalue())
 
     def test_reused_destination_is_verified_before_pointer(self):
         candidate = self.candidate(migration=True)
