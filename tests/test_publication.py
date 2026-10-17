@@ -2,13 +2,14 @@ import copy
 import io
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
-import uuid
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
+import paramiko
 from botocore.exceptions import ClientError
 
 from publisher.publication import finalize, garbage_collect, prepare, read_release, upload_shard
@@ -23,8 +24,6 @@ class S3:
         self.writes = []
         self.reads = []
         self.fail_key = None
-        self.race = None
-        self.uploads = {}
 
     def seed(self, key, body, *, days=0, metadata=None):
         self.objects[key] = {"Body": body, "ETag": '"' + digest(body) + '"', "ContentLength": len(body),
@@ -46,20 +45,6 @@ class S3:
             self.error(404)
         return {name: value for name, value in self.objects[Key].items() if name != "Body"}
 
-    def put_object(self, Bucket, Key, Body, IfMatch=None, IfNoneMatch=None, **kwargs):
-        if self.race and Key.endswith("/latest.json"):
-            self.seed(Key, self.race)
-            self.race = None
-        if Key == self.fail_key:
-            self.error(503)
-        if IfNoneMatch and Key in self.objects:
-            self.error(412)
-        if IfMatch and self.objects.get(Key, {}).get("ETag") != IfMatch:
-            self.error(412)
-        data = Body.read() if hasattr(Body, "read") else Body
-        self.writes.append(("put", Key, len(data)))
-        return {"ETag": self.seed(Key, data, metadata=kwargs.get("Metadata"))}
-
     def copy_object(self, Bucket, Key, CopySource, CopySourceIfMatch, **kwargs):
         source = self.objects[CopySource["Key"]]
         if source["ETag"] != CopySourceIfMatch:
@@ -72,41 +57,6 @@ class S3:
             if name in kwargs:
                 self.objects[Key][name] = kwargs[name]
         return {"CopyObjectResult": {"ETag": etag}}
-
-    def create_multipart_upload(self, Bucket, Key, **kwargs):
-        upload_id = uuid.uuid4().hex
-        self.uploads[upload_id] = {"Key": Key, "Metadata": kwargs.get("Metadata"), "parts": {}}
-        return {"UploadId": upload_id}
-
-    def upload_part(self, Bucket, Key, UploadId, PartNumber, Body):
-        if Key == self.fail_key:
-            self.error(503)
-        data = Body.read() if hasattr(Body, "read") else Body
-        etag = '"' + digest(data) + '"'
-        self.uploads[UploadId]["parts"][PartNumber] = (data, etag)
-        return {"ETag": etag}
-
-    def complete_multipart_upload(self, Bucket, Key, UploadId, MultipartUpload, IfMatch=None, IfNoneMatch=None):
-        if IfNoneMatch and Key in self.objects:
-            self.error(412)
-        if IfMatch and self.objects.get(Key, {}).get("ETag") != IfMatch:
-            self.error(412)
-        upload = self.uploads[UploadId]
-        data = b""
-        for part in MultipartUpload["Parts"]:
-            chunk, etag = upload["parts"][part["PartNumber"]]
-            if part["ETag"] != etag:
-                self.error(400)
-            data += chunk
-        self.writes.append(("multipart", Key, len(data)))
-        etag = self.seed(Key, data, metadata=upload["Metadata"])
-        del self.uploads[UploadId]
-        return {"ETag": etag}
-
-    def abort_multipart_upload(self, Bucket, Key, UploadId):
-        if UploadId not in self.uploads:
-            raise ClientError({"Error": {"Code": "NoSuchUpload"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "AbortMultipartUpload")
-        del self.uploads[UploadId]
 
     def get_paginator(self, operation):
         return self
@@ -122,12 +72,32 @@ class S3:
         del self.objects[Key]
 
 
+@contextmanager
+def sftp_mock(s3):
+    ssh = MagicMock()
+    ssh.__enter__.return_value = ssh
+    def upload(source, path, **kwargs):
+        bucket, key = path.lstrip("/").split("/", 1)
+        if bucket != os.environ["S3_BUCKET_NAME"]:
+            raise ValueError("Wrong SFTP bucket")
+        data = source.read()
+        s3.seed(key, data)
+        s3.writes.append(("sftp", key, len(data)))
+    ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect = upload
+    host_key = paramiko.RSAKey.generate(1024)
+    with patch.dict(os.environ, {"SFTP_ENDPOINT": "sftp://storage.example:8022",
+                                 "SFTP_HOST_KEY": f"{host_key.get_name()} {host_key.get_base64()}"}), \
+            patch("paramiko.SSHClient", return_value=ssh):
+        yield ssh
+
+
 class PublicationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.s3 = S3()
+        self.ssh = self.enterContext(sftp_mock(self.s3))
         self.env = patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "S3_ENDPOINT": "https://s3.example", "S3_ACCESS_KEY_ID": "test", "S3_SECRET_ACCESS_KEY": "test"})
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -186,7 +156,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(plan["summary"]["upload"], {"count": 1, "bytes": 9})
         self.assertEqual(plan["summary"]["reuse"]["count"], 3)
         self.assertTrue(old_keys <= set(self.s3.objects))
-        self.assertEqual(len([key for mode, key, _ in self.s3.writes if key.startswith("phigros/music/")]), 1)
+        self.assertEqual(len([key for mode, key, _ in self.s3.writes if mode == "sftp" and key.startswith("phigros/music/")]), 1)
         release = read_release(Storage("phigros"), "phigros")
         self.assertIsNotNone(release["manifest"]["previousManifest"])
 
@@ -203,7 +173,6 @@ class PublicationTests(unittest.TestCase):
         self.s3.fail_key = plan["tasks"][0]["key"]
         with self.assertRaises(ClientError):
             upload_shard(plan, plan["tasks"][0]["shard"], self.root / f"plan/shard-{plan['tasks'][0]['shard']}", self.root / "receipt.json")
-        self.assertEqual(self.s3.uploads, {})
         with self.assertRaisesRegex(ValueError, "child workflows"):
             finalize(plan, [])
         self.assertEqual(self.s3.objects["phigros/latest.json"]["Body"], original)
@@ -218,19 +187,25 @@ class PublicationTests(unittest.TestCase):
         self.assertNotIn("phigros/latest.json", self.s3.objects)
         self.assertEqual(self.s3.writes, [])
 
-    def test_pointer_compare_and_swap_conflict_preserves_winner(self):
+    def test_pointer_baseline_check_preserves_winner(self):
         self.publish(self.candidate(), migration=True)
         winner = self.s3.objects["phigros/latest.json"]["Body"] + b" "
         candidate = self.candidate({"catalog.json": b"changed", "metadata/note_counts.tsv": b"notes"})
-        self.s3.race = winner
-        with self.assertRaises(ClientError):
-            self.publish(candidate)
+        copy_object = self.s3.copy_object
+        def concurrent(**args):
+            result = copy_object(**args)
+            if "/manifests/" in args["Key"]:
+                self.s3.seed("phigros/latest.json", winner)
+            return result
+        with patch.object(self.s3, "copy_object", side_effect=concurrent):
+            with self.assertRaises(ClientError):
+                self.publish(candidate)
         self.assertEqual(self.s3.objects["phigros/latest.json"]["Body"], winner)
 
-    def test_conditional_pointer_retry_after_false_not_found(self):
+    def test_pointer_metadata_retry_after_false_not_found(self):
         self.publish(self.candidate(), migration=True)
         candidate = self.candidate({"catalog.json": b"updated catalog", "metadata/note_counts.tsv": b"notes"})
-        put = self.s3.put_object
+        copy_object = self.s3.copy_object
         failed = False
 
         def transient(**args):
@@ -238,9 +213,9 @@ class PublicationTests(unittest.TestCase):
             if args["Key"].endswith("/latest.json") and not failed:
                 failed = True
                 self.s3.error(404)
-            return put(**args)
+            return copy_object(**args)
 
-        with patch.object(self.s3, "put_object", side_effect=transient):
+        with patch.object(self.s3, "copy_object", side_effect=transient):
             _, result = self.publish(candidate)
         self.assertEqual(read_release(Storage("phigros"), "phigros")["pointer"], result["pointer"])
         self.assertEqual(result["pointer"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
@@ -249,67 +224,53 @@ class PublicationTests(unittest.TestCase):
         self.publish(self.candidate(), migration=True)
         data = b"updated music"
         candidate = self.candidate({"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": data})
-        put = self.s3.put_object
+        copy_object = self.s3.copy_object
         failed = False
 
         def transient(**args):
             nonlocal failed
             if args["Key"].startswith("phigros/music/"):
-                if args.get("IfNoneMatch"):
-                    self.s3.error(503)
                 if not failed:
                     failed = True
-                    args["Body"].read()
                     self.s3.error(503)
-            return put(**args)
+            return copy_object(**args)
 
-        with patch.object(self.s3, "put_object", side_effect=transient):
+        with patch.object(self.s3, "copy_object", side_effect=transient):
             self.publish(candidate)
         self.assertEqual(self.s3.objects[f"phigros/music/{digest(data)}.ogg"]["Body"], data)
         self.assertEqual(read_release(Storage("phigros"), "phigros")["manifest"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
 
-    def test_conditional_write_readback_accepts_committed_error(self):
+    def test_metadata_write_readback_accepts_committed_error(self):
         self.publish(self.candidate(), migration=True)
         for prefix in ("phigros/music/", "phigros/latest.json"):
             with self.subTest(prefix=prefix):
                 data = prefix.encode()
                 candidate = self.candidate({"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": data})
-                put = self.s3.put_object
+                copy_object = self.s3.copy_object
                 failed = False
 
                 def committed(**args):
                     nonlocal failed
-                    result = put(**args)
+                    result = copy_object(**args)
                     if args["Key"].startswith(prefix) and not failed:
                         failed = True
                         self.s3.error(503)
                     return result
 
-                with patch.object(self.s3, "put_object", side_effect=committed):
+                with patch.object(self.s3, "copy_object", side_effect=committed):
                     self.publish(candidate)
                 self.assertEqual(self.s3.objects[f"phigros/music/{digest(data)}.ogg"]["Body"], data)
                 self.assertEqual(read_release(Storage("phigros"), "phigros")["manifest"]["resourceVersion"], candidate["manifest"]["resourceVersion"])
 
-    def test_multipart_commit_error_accepts_verified_object(self):
+    def test_destination_prechecks_preserve_existing_content(self):
         self.publish(self.candidate(), migration=True)
-        data = b"updated music"
-        candidate = self.candidate({"catalog.json": b'{"songs":[]}', "metadata/note_counts.tsv": b"notes", "music/song.ogg": data})
-        put, complete = self.s3.put_object, self.s3.complete_multipart_upload
-
-        def unwritable(**args):
-            if args["Key"].startswith("phigros/music/"):
-                args["Body"].read()
-                self.s3.error(503)
-            return put(**args)
-
-        def committed(**args):
-            complete(**args)
-            self.s3.error(503)
-
-        with patch.object(self.s3, "put_object", side_effect=unwritable), patch.object(self.s3, "complete_multipart_upload", side_effect=committed):
-            self.publish(candidate)
-        self.assertEqual(self.s3.objects[f"phigros/music/{digest(data)}.ogg"]["Body"], data)
-        self.assertEqual(self.s3.uploads, {})
+        original = copy.deepcopy(self.s3.objects)
+        storage = Storage("phigros")
+        for condition in ({"absent": True}, {"etag": '"wrong"'}):
+            with self.subTest(condition=condition), self.assertRaises(ClientError) as caught:
+                storage.put("phigros/latest.json", b"changed", "application/json", **condition)
+            self.assertEqual(caught.exception.response["ResponseMetadata"]["HTTPStatusCode"], 412)
+        self.assertEqual(self.s3.objects, original)
 
     def test_reused_destination_is_verified_before_pointer(self):
         candidate = self.candidate(migration=True)

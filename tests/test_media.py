@@ -12,7 +12,7 @@ from publisher.media import content_digest
 from publisher.publication import finalize, prepare, upload_shard
 from publisher.resources import local_candidate, normalize
 from publisher.storage import digest, encode
-from test_publication import S3
+from test_publication import S3, sftp_mock
 
 
 def png(level, changed=False):
@@ -49,6 +49,7 @@ class MediaTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.s3 = S3()
+        self.enterContext(sftp_mock(self.s3))
         for context in (patch.dict(os.environ, {"S3_BUCKET_NAME": "rranker-phigros-data", "S3_ENDPOINT": "https://example.test",
                                                "S3_ACCESS_KEY_ID": "test", "S3_SECRET_ACCESS_KEY": "test"}),
                         patch("publisher.storage.boto3.client", return_value=self.s3)):

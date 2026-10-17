@@ -4,14 +4,14 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import paramiko
 
 from publisher.publication import finalize, prepare, upload_shard
 from publisher.resources import KYOU_FILES, migration_candidate, normalize
 from publisher.storage import digest, encode
-from test_publication import S3
+from test_publication import S3, sftp_mock
 from test_rizline import PNG, sample_acb, overrides
 
 
@@ -21,25 +21,12 @@ class ResourceContracts(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.s3 = S3()
-        self.ssh = MagicMock()
-        self.ssh.__enter__.return_value = self.ssh
-        self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect = self.sftp_upload
-        host_key = paramiko.RSAKey.generate(1024)
-        for context in (patch.dict(os.environ, {"S3_ENDPOINT": "https://example.test", "S3_ACCESS_KEY_ID": "test", "S3_SECRET_ACCESS_KEY": "test", "S3_BUCKET_NAME": "rranker-rizline-data",
-                                               "SFTP_ENDPOINT": "sftp://storage.example:8022", "SFTP_HOST_KEY": f"{host_key.get_name()} {host_key.get_base64()}"}),
+        self.ssh = self.enterContext(sftp_mock(self.s3))
+        for context in (patch.dict(os.environ, {"S3_ENDPOINT": "https://example.test", "S3_ACCESS_KEY_ID": "test", "S3_SECRET_ACCESS_KEY": "test", "S3_BUCKET_NAME": "rranker-rizline-data"}),
                         patch("publisher.storage.boto3.client", return_value=self.s3),
-                        patch("paramiko.SSHClient", return_value=self.ssh),
                         patch("publisher.storage.time.sleep")):
             context.start()
             self.addCleanup(context.stop)
-
-    def sftp_upload(self, source, path, **kwargs):
-        bucket, key = path.lstrip("/").split("/", 1)
-        if bucket != os.environ["S3_BUCKET_NAME"]:
-            raise ValueError("Wrong SFTP bucket")
-        data = source.read()
-        self.s3.seed(key, data)
-        self.s3.writes.append(("sftp", key, len(data)))
 
     def test_rizline_migration_uploads_only_rewritten_catalog(self):
         prefix = "rizline/releases/2026-09-20-2/"
@@ -153,8 +140,9 @@ class ResourceContracts(unittest.TestCase):
     def test_kyou_sftp_corruption_prevents_publication(self):
         finalize(*self.kyou_plan("base", migration=True))
         original = self.s3.objects["kyou/latest.json"]["Body"]
+        upload = self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect
         def corrupted(source, path, **kwargs):
-            self.sftp_upload(source, path, **kwargs)
+            upload(source, path, **kwargs)
             key = path.lstrip("/").split("/", 1)[1]
             self.s3.seed(key, b"corrupt")
         self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect = corrupted

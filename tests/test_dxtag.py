@@ -13,7 +13,7 @@ from botocore.exceptions import ClientError
 
 from publisher.__main__ import main
 from publisher.dxtag import SONG_LIST_URL
-from test_publication import S3
+from test_publication import S3, sftp_mock
 
 AXES = ("键盘", "星星", "技巧", "体力", "爆发")
 NAMES = ("BASIC", "ADVANCED", "EXPERT", "MASTER", "Re:MASTER")
@@ -43,6 +43,7 @@ class DxtagTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.s3 = S3()
+        self.enterContext(sftp_mock(self.s3))
         self.urls = []
         self.absent = set()
         self.chart_bytes = {}
@@ -131,7 +132,7 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(result["uploaded"], [10030])
         self.assertEqual(self.s3.objects["DXTag/30.json"]["Body"], existing)
-        self.assertEqual([key for mode, key, _size in self.s3.writes], ["DXTag/10030.json", "DXTag/all.json"])
+        self.assertEqual([key for mode, key, _size in self.s3.writes if mode == "sftp"], ["DXTag/10030.json", "DXTag/all.json"])
         self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {
             "30": json.loads(existing),
             "10030": [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}],

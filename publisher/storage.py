@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -75,7 +76,6 @@ def parallel(function, items, workers=8):
 
 class Storage:
     def __init__(self, game):
-        self._game = game
         self.bucket = os.environ["S3_BUCKET_NAME"]
         if self.bucket != BUCKETS[game]:
             raise ValueError(f"Wrong bucket for {game}")
@@ -88,11 +88,6 @@ class Storage:
                           retries={"max_attempts": 4, "mode": "standard"}, max_pool_connections=16,
                           request_checksum_calculation="when_required", response_checksum_validation="when_required"),
         )
-        if game == "kyou":
-            def send_body(request, **kwargs):
-                request.headers.pop("Expect", None)
-            for operation in ("PutObject", "UploadPart"):
-                self.client.meta.events.register(f"before-send.s3.{operation}", send_body)
 
     def head(self, key):
         try:
@@ -143,29 +138,23 @@ class Storage:
     def put(self, key, body, content_type, *, etag=None, absent=False, sha256=None, immutable=False):
         args = {"Bucket": self.bucket, "Key": safe_path(key), "Body": body, "ContentType": content_type,
                 "CacheControl": "public,max-age=31536000,immutable" if immutable else "no-cache,no-store,must-revalidate"}
-        if etag:
-            args["IfMatch"] = etag
-        if absent:
-            args["IfNoneMatch"] = "*"
+        if etag or absent:
+            head = self.head(key)
+            if (etag and (head is None or head["ETag"] != etag)) or (absent and head is not None):
+                raise ClientError({"Error": {"Code": "PreconditionFailed", "Message": "Publication destination changed"},
+                                   "ResponseMetadata": {"HTTPStatusCode": 412}}, "SFTPPut")
         if sha256:
             args["Metadata"] = {"sha256": sha256}
         position = body.tell() if hasattr(body, "tell") else None
-        sftp = self._game == "kyou" and not (etag or absent)
-        multipart = self._game == "kyou" and immutable and bool(sha256)
         for attempt in range(3):
             try:
-                if sftp:
-                    return self._sftp_put(args)
-                return self._multipart_put(args) if multipart else self.client.put_object(**args)["ETag"]
+                return self._sftp_put(args)
             except ClientError as error:
                 status = error.response["ResponseMetadata"]["HTTPStatusCode"]
-                if not (sftp or etag or absent or (immutable and sha256)) or status not in (404, 409, 412, 500, 502, 503, 504):
+                if status not in (404, 409, 412, 500, 502, 503, 504):
                     raise
                 head = self.head(key)
-                if head and (absent or head["ETag"] != etag) and (not sftp or (
-                    head.get("ContentType") == args["ContentType"] and head.get("CacheControl") == args["CacheControl"]
-                    and head.get("Metadata", {}) == args.get("Metadata", {})
-                )):
+                if head and (absent or head["ETag"] != etag):
                     if position is None:
                         size, expected = len(body), digest(body)
                     else:
@@ -175,14 +164,15 @@ class Storage:
                         expected = sha256 or hashlib.file_digest(body, "sha256").hexdigest()
                         body.seek(position)
                     try:
-                        return self.verify(key, size, expected, head["ETag"])
+                        verified = self.verify(key, size, expected, head["ETag"])
                     except ValueError:
                         raise error
+                    if (head.get("ContentType") == args["ContentType"] and head.get("CacheControl") == args["CacheControl"]
+                            and head.get("Metadata", {}) == args.get("Metadata", {})):
+                        return verified
                 if status == 412 or (etag and head is None) or attempt == 2:
                     raise
-                if immutable and sha256 and not etag and status >= 500:
-                    multipart = True
-                print(f"Retrying object write after HTTP {status}: {key}", flush=True)
+                print(f"Retrying object write after HTTP {status}: {key}", file=sys.stderr, flush=True)
                 time.sleep(2 ** (attempt + 1))
                 if position is not None:
                     body.seek(position)
@@ -198,7 +188,7 @@ class Storage:
         port = endpoint.port or 22
         host = endpoint.hostname if port == 22 else f"[{endpoint.hostname}]:{port}"
         source = args["Body"] if hasattr(args["Body"], "read") else io.BytesIO(args["Body"])
-        print(f"Uploading through SFTP: {args['Key']}", flush=True)
+        print(f"Uploading through SFTP: {args['Key']}", file=sys.stderr, flush=True)
         with paramiko.SSHClient() as ssh:
             ssh.get_host_keys().add(host, host_key.get_name(), host_key)
             ssh.connect(endpoint.hostname, port=port, username=os.environ["S3_ACCESS_KEY_ID"],
@@ -215,33 +205,6 @@ class Storage:
             CopySourceIfMatch=head["ETag"], MetadataDirective="REPLACE", Metadata=args.get("Metadata", {}),
             ContentType=args["ContentType"], CacheControl=args["CacheControl"],
         )["CopyObjectResult"]["ETag"]
-
-    def _multipart_put(self, args):
-        target = {name: args[name] for name in ("Bucket", "Key")}
-        print(f"Starting multipart upload: {args['Key']}", flush=True)
-        upload = self.client.create_multipart_upload(**{name: value for name, value in args.items()
-                                                       if name not in ("Body", "IfMatch", "IfNoneMatch")})
-        upload_id = upload["UploadId"]
-        source = args["Body"] if hasattr(args["Body"], "read") else io.BytesIO(args["Body"])
-        try:
-            parts = []
-            while chunk := source.read(8 * 1024 * 1024):
-                print(f"Uploading part {len(parts) + 1} ({len(chunk)} bytes): {args['Key']}", flush=True)
-                part = self.client.upload_part(**target, UploadId=upload_id, PartNumber=len(parts) + 1, Body=chunk)
-                parts.append({"PartNumber": len(parts) + 1, "ETag": part["ETag"]})
-            print(f"Completing multipart upload: {args['Key']}", flush=True)
-            response = self.client.complete_multipart_upload(
-                **target, UploadId=upload_id, MultipartUpload={"Parts": parts},
-                **{name: args[name] for name in ("IfMatch", "IfNoneMatch") if name in args})
-            upload_id = None
-            return response["ETag"]
-        finally:
-            if upload_id:
-                try:
-                    self.client.abort_multipart_upload(**target, UploadId=upload_id)
-                except ClientError as error:
-                    if error.response["Error"]["Code"] != "NoSuchUpload":
-                        raise
 
     def copy(self, source, etag, target, sha256, content_type, *, immutable=True):
         return self.client.copy_object(

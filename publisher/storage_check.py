@@ -10,7 +10,7 @@ def check(game):
     storage = Storage(game)
     prefix = f"{'release' if game == 'apk' else game}/.checks/{uuid.uuid4().hex}"
     source, target = prefix + "/source", prefix + "/copy"
-    data = b"resource-publisher-conditional-write-check"
+    data = b"resource-publisher-write-check"
     try:
         etag = storage.put(source, data, "application/octet-stream", absent=True)
         def rejected(action):
@@ -28,7 +28,7 @@ def check(game):
         rejected(lambda: storage.copy(source, '"wrong-etag"', target, digest(data), "application/octet-stream"))
         copied = storage.copy(source, etag, target, digest(data + b"2"), "application/octet-stream")
         storage.verify(target, len(data) + 1, digest(data + b"2"), copied)
-        return {"conditionalPut": True, "conditionalCopy": True, "readback": True}
+        return {"destinationPrechecks": True, "conditionalCopy": True, "readback": True}
     finally:
         for key in (target, source):
             head = storage.head(key)

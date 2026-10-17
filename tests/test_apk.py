@@ -5,12 +5,12 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import zipfile
 
 from publisher.apk import ABI_NAMES, CERTIFICATE, publish, verify_apk
 from publisher.storage import digest
-from test_publication import S3
+from test_publication import S3, sftp_mock
 
 
 def apk_bytes(abi):
@@ -28,6 +28,7 @@ class ApkTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "sdk/build-tools/36.0.0").mkdir(parents=True)
         self.s3 = S3()
+        self.enterContext(sftp_mock(self.s3))
         self.release = {"id": 123, "tag_name": "0.3.0", "draft": False, "prerelease": False, "published_at": "2026-09-02T00:00:00Z", "assets": []}
         for abi, name in ABI_NAMES.items():
             data = apk_bytes(abi)
@@ -67,6 +68,31 @@ class ApkTests(unittest.TestCase):
             publish(123, self.root, bootstrap=True, execute=True)
         self.assertEqual(self.s3.writes, [])
         self.assertEqual(json.loads((self.root / "report.json").read_bytes())["completed"], [])
+
+    def test_formal_release_uploads_all_four_apks_and_preserves_cache_policy(self):
+        payloads = {}
+        for abi, name in ABI_NAMES.items():
+            asset = next(row for row in self.release["assets"] if row["name"].endswith(f"-{name}.apk"))
+            asset["name"] = f"rRanker-{name}.apk"
+            asset["browser_download_url"] = f"https://release.example/{name}.apk"
+            payloads[asset["browser_download_url"]] = self.s3.objects[f"release/0.3.0/rRanker-0.3.0-{name}.apk"]["Body"]
+            self.s3.seed(f"release/rRanker-{name}.apk", b"previous")
+        def download(url, **kwargs):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.iter_content.return_value = [payloads[url]]
+            return response
+        with patch("publisher.apk.requests.get", side_effect=download):
+            result = publish(123, self.root, execute=True)
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(len(result["completed"]), 4)
+        for item in result["objects"]:
+            row = self.s3.objects[item["key"]]
+            self.assertEqual(len(row["Body"]), item["size"])
+            self.assertEqual(digest(row["Body"]), item["sha256"])
+            self.assertEqual(row["Metadata"]["sha256"], item["sha256"])
+            self.assertEqual(row["ContentType"], "application/vnd.android.package-archive")
+            self.assertEqual(row["CacheControl"], "no-cache,no-store,must-revalidate")
 
     def test_failed_copy_reports_completed_objects_and_retry_finishes(self):
         self.s3.fail_key = "release/rRanker-x86.apk"
