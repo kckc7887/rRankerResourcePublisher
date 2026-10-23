@@ -8,6 +8,10 @@ on:
         description: 补齐缺失曲目并更新全曲库版；默认只列出缺失
         type: boolean
         default: false
+      refresh:
+        description: 重算并覆盖当前曲库全部评分；需同时开启 execute
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -33,7 +37,7 @@ jobs:
         if: github.event_name == 'schedule' || inputs.execute
         with:
           repository: kckc7887/DXTag
-          ref: cbea1ff20d69c3eaa163c7d967b708bd076e5d96
+          ref: 41e70ba6d3ed59e446751b6c9062692641ef3e15
           path: DXTag
           persist-credentials: false
       - uses: actions/setup-python@v6
@@ -56,6 +60,7 @@ jobs:
         continue-on-error: true
         env:
           EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute }}
+          REFRESH: ${{ inputs.refresh }}
           DXTAG_ROOT: ${{ github.workspace }}/DXTag
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
           S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
@@ -66,6 +71,7 @@ jobs:
         run: |
           args=()
           if [ "$EXECUTE" = true ]; then args+=(--execute); fi
+          if [ "$REFRESH" = true ]; then args+=(--refresh); fi
           python -m publisher dxtag --output work/dxtag "${args[@]}"
       - name: Fail invalid DXTag publications
         if: steps.publish.outcome == 'failure' && steps.publish.outputs.cloud_fallback != 'true'

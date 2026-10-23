@@ -151,6 +151,61 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(self.s3.objects["DXTag/8.json"]["Body"], existing)
         self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {"8": json.loads(existing)})
 
+    def test_refresh_replaces_current_charts_and_preserves_unrelated_objects(self):
+        existing = b'[{"difficulty":3,"scores":[1,2,3,4,5]}]\n'
+        self.s3.seed("DXTag/8.json", existing)
+        self.s3.seed("DXTag/999.json", existing)
+        code, result = self.publish("--refresh")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["targets"], [8, 30, 10030, 11639])
+        self.assertEqual(self.urls, [SONG_LIST_URL])
+        self.assertEqual(self.s3.writes, [])
+
+        code, result = self.publish("--execute", "--refresh")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["uploaded"], [8, 30, 10030, 11639])
+        scores = [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}]
+        for chart_id in result["uploaded"]:
+            self.assertEqual(json.loads(self.s3.objects[f"DXTag/{chart_id}.json"]["Body"]), scores)
+        self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {
+            str(chart_id): scores for chart_id in result["uploaded"]
+        })
+        self.assertEqual(self.s3.objects["DXTag/999.json"]["Body"], existing)
+
+    def test_refresh_upload_failure_can_retry_prepared_scores_over_existing_objects(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        existing = b'[{"difficulty":3,"scores":[1,2,3,4,5]}]\n'
+        previous = b'{"8":[{"difficulty":3,"scores":[1,2,3,4,5]}]}\n'
+        self.s3.seed("DXTag/8.json", existing)
+        self.s3.seed("DXTag/all.json", previous)
+        self.s3.fail_key = "DXTag/8.json"
+        output = self.root / "github-output"
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), patch("publisher.storage.time.sleep"):
+            code, result = self.publish("--execute", "--refresh")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["failed"][0]["stage"], "upload")
+        self.assertIn("cloud_fallback=true", output.read_text(encoding="utf-8"))
+        self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
+        self.s3.seed("DXTag/8.json", existing)
+        self.s3.fail_key = None
+        self.absent.add(8)
+        retried = publish_prepared(self.root / "plan.json")
+        self.assertEqual(retried["completed"], [8])
+        scores = [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}]
+        self.assertEqual(json.loads(self.s3.objects["DXTag/8.json"]["Body"]), scores)
+        self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {"8": scores})
+
+    def test_refresh_score_failure_preserves_library_and_rejects_incomplete_retry(self):
+        previous = b'{"8":[{"difficulty":3,"scores":[1,2,3,4,5]}]}\n'
+        self.s3.seed("DXTag/all.json", previous)
+        self.chart_bytes[8] = b"fail"
+        code, result = self.publish("--execute", "--refresh")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["failed"][0]["stage"], "prepare")
+        self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            publish_prepared(self.root / "plan.json")
+
     def test_full_library_is_created_without_missing_charts_and_refreshed_on_update(self):
         existing = b'[{"difficulty":3,"scores":[1,2,3,4,5]}]\n'
         for chart_id in (8, 30, 10030, 11639):

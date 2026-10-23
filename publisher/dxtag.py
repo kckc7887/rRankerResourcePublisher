@@ -111,11 +111,11 @@ def score_chart(chart_id, output):
     return charts_document(json.loads(completed.stdout))
 
 
-def _upload_chart(storage, chart_id, body):
+def _upload_chart(storage, chart_id, body, *, refresh=False):
     try:
-        etag = storage.put(object_key(chart_id), body, "application/json", absent=True)
+        etag = storage.put(object_key(chart_id), body, "application/json", absent=not refresh)
     except ClientError as error:
-        if error.response["ResponseMetadata"]["HTTPStatusCode"] == 412:
+        if not refresh and error.response["ResponseMetadata"]["HTTPStatusCode"] == 412:
             return False
         raise
     storage.verify(object_key(chart_id), len(body), digest(body), etag)
@@ -137,7 +137,8 @@ def publish_prepared(plan_path):
     plan_path = Path(plan_path)
     plan = json.loads(plan_path.read_bytes())
     storage = Storage("dxtag")
-    if plan["bucket"] != storage.bucket or {row["id"] for row in plan["objects"]} != set(plan["missing"]):
+    targets = plan["expected"] if plan["refresh"] else plan["missing"]
+    if plan["bucket"] != storage.bucket or {row["id"] for row in plan["objects"]} != set(targets):
         raise ValueError("Incomplete prepared DXTag publication")
     for item in plan["objects"]:
         path = plan_path.parent / "payload" / object_key(item["id"])
@@ -147,6 +148,10 @@ def publish_prepared(plan_path):
     for item in plan["objects"]:
         key = object_key(item["id"])
         head = storage.head(key)
+        if plan["refresh"] and (not head or head.get("Metadata", {}).get("sha256") != item["sha256"]):
+            _upload_chart(storage, item["id"], (plan_path.parent / "payload" / key).read_bytes(), refresh=True)
+            completed.append(item["id"])
+            continue
         if head:
             storage.verify(key, item["size"], item["sha256"], head["ETag"])
             if (head.get("Metadata", {}).get("sha256") != item["sha256"] or head.get("ContentType") != "application/json"
@@ -159,19 +164,20 @@ def publish_prepared(plan_path):
     return {"completed": completed, "library": _write_library(storage, _library_body(storage, plan["expected"]), len(plan["expected"]))}
 
 
-def publish(*, execute=False, output=Path("work/dxtag")):
+def publish(*, execute=False, refresh=False, output=Path("work/dxtag")):
     storage = Storage("dxtag")
     response = requests.get(SONG_LIST_URL, timeout=(10, 60))
     response.raise_for_status()
     expected = expected_chart_ids(response.json())
     missing = sorted(expected - present_chart_ids(storage.list("DXTag/")))
-    result = {"missing": missing, "uploaded": [], "failed": [], "library": None}
+    targets = sorted(expected) if refresh else missing
+    result = {"missing": missing, "targets": targets, "uploaded": [], "failed": [], "library": None}
     if not execute:
         return result
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    prepared = {"bucket": storage.bucket, "expected": sorted(expected), "missing": missing, "objects": []}
-    for chart_id in missing:
+    prepared = {"bucket": storage.bucket, "expected": sorted(expected), "missing": missing, "refresh": refresh, "objects": []}
+    for chart_id in targets:
         try:
             body = score_chart(chart_id, output)
         except (OSError, ValueError, RuntimeError, requests.RequestException, json.JSONDecodeError) as error:
@@ -182,7 +188,7 @@ def publish(*, execute=False, output=Path("work/dxtag")):
         path.write_bytes(body)
         prepared["objects"].append({"id": chart_id, "size": len(body), "sha256": digest(body)})
         try:
-            if _upload_chart(storage, chart_id, body):
+            if _upload_chart(storage, chart_id, body, refresh=refresh):
                 result["uploaded"].append(chart_id)
         except Exception as error:
             stage = "upload" if recoverable_upload_error(error) else "verify"

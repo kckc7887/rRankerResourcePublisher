@@ -41,6 +41,7 @@ def main():
     single.add_argument("--payload", type=Path, required=True)
     dxtag = commands.add_parser("dxtag")
     dxtag.add_argument("--execute", action="store_true")
+    dxtag.add_argument("--refresh", action="store_true")
     dxtag.add_argument("--output", type=Path, default=Path("work/dxtag"))
     args = parser.parse_args()
     failed = False
@@ -51,7 +52,7 @@ def main():
     if args.command == "dxtag":
         from .dxtag import DxtagIncomplete, publish
         try:
-            result = publish(execute=args.execute, output=args.output)
+            result = publish(execute=args.execute, refresh=args.refresh, output=args.output)
         except DxtagIncomplete as error:
             result = error.result
             failed = True
