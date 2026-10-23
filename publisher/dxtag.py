@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 
 import requests
 from botocore.exceptions import ClientError
@@ -92,11 +93,22 @@ def charts_document(rows):
     return f"[{body}]\n".encode()
 
 
+def _fetch(url):
+    for attempt in range(3):
+        try:
+            response = requests.get(url, timeout=(30, 60))
+            response.raise_for_status()
+            return response
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 2:
+                raise
+            time.sleep(2 ** (attempt + 1))
+
+
 def score_chart(chart_id, output):
     if not os.environ.get("DXTAG_ROOT"):
         raise ValueError("DXTAG_ROOT is required")
-    response = requests.get(CHART_URL.format(chart_id=chart_id), timeout=(10, 60))
-    response.raise_for_status()
+    response = _fetch(CHART_URL.format(chart_id=chart_id))
     path = output / f"{chart_id}.txt"
     path.write_bytes(response.content)
     try:
@@ -112,13 +124,27 @@ def score_chart(chart_id, output):
 
 
 def _upload_chart(storage, chart_id, body, *, refresh=False):
-    try:
-        etag = storage.put(object_key(chart_id), body, "application/json", absent=not refresh)
-    except ClientError as error:
-        if not refresh and error.response["ResponseMetadata"]["HTTPStatusCode"] == 412:
+    key = object_key(chart_id)
+    if refresh:
+        head = storage.head(key)
+        if (head and head.get("ContentType") == "application/json"
+                and head.get("CacheControl") == "no-cache,no-store,must-revalidate"
+                and storage.get(key, head["ETag"])[0] == body):
             return False
-        raise
-    storage.verify(object_key(chart_id), len(body), digest(body), etag)
+    for attempt in range(3 if refresh else 1):
+        try:
+            etag = storage.put(key, body, "application/json", absent=not refresh)
+        except ClientError as error:
+            if not refresh and error.response["ResponseMetadata"]["HTTPStatusCode"] == 412:
+                return False
+            raise
+        try:
+            storage.verify(key, len(body), digest(body), etag)
+            break
+        except ValueError:
+            if not refresh or attempt == 2:
+                raise
+            time.sleep(2 ** (attempt + 1))
     return True
 
 
@@ -166,8 +192,7 @@ def publish_prepared(plan_path):
 
 def publish(*, execute=False, refresh=False, output=Path("work/dxtag")):
     storage = Storage("dxtag")
-    response = requests.get(SONG_LIST_URL, timeout=(10, 60))
-    response.raise_for_status()
+    response = _fetch(SONG_LIST_URL)
     expected = expected_chart_ids(response.json())
     missing = sorted(expected - present_chart_ids(storage.list("DXTag/")))
     targets = sorted(expected) if refresh else missing

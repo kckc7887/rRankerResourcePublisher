@@ -206,6 +206,59 @@ class DxtagTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Incomplete"):
             publish_prepared(self.root / "plan.json")
 
+    def test_catalog_and_chart_downloads_recover_from_timeouts(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        timed_out = set()
+        def fetch(url, timeout):
+            if url not in timed_out:
+                timed_out.add(url)
+                raise requests.ReadTimeout("TLS handshake timed out")
+            return self.fetch(url, timeout)
+        with patch("publisher.dxtag.requests.get", side_effect=fetch), patch("publisher.dxtag.time.sleep"):
+            code, result = self.publish("--execute", "--refresh")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["uploaded"], [8])
+        self.assertEqual(result["library"], {"key": "DXTag/all.json", "charts": 1})
+
+    def test_refresh_reuses_matching_scores_after_recalculation(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        self.assertEqual(self.publish("--execute", "--refresh")[0], 0)
+        self.s3.fail_key = "DXTag/8.json"
+        self.urls.clear()
+        code, result = self.publish("--execute", "--refresh")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["uploaded"], [])
+        self.assertIn("https://assets2.lxns.net/maimai/chart/8.txt", self.urls)
+        self.assertEqual(result["library"], {"key": "DXTag/all.json", "charts": 1})
+
+    def test_refresh_retries_mismatched_upload_and_preserves_library_if_it_persists(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        previous = b'{"8":[{"difficulty":3,"scores":[1,2,3,4,5]}]}\n'
+        get_object = self.s3.get_object
+        for persistent in (False, True):
+            with self.subTest(persistent=persistent):
+                self.s3.objects.clear()
+                self.s3.seed("DXTag/all.json", previous)
+                stale = True
+                def get(**kwargs):
+                    nonlocal stale
+                    row = get_object(**kwargs)
+                    if kwargs["Key"] == "DXTag/8.json" and (stale or persistent):
+                        row["Body"] = io.BytesIO(b"old scores")
+                        stale = False
+                    return row
+                with patch.object(self.s3, "get_object", side_effect=get), patch("publisher.dxtag.time.sleep"):
+                    code, result = self.publish("--execute", "--refresh")
+                if persistent:
+                    self.assertEqual(code, 1)
+                    self.assertEqual(result["failed"][0]["stage"], "verify")
+                    self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
+                else:
+                    self.assertEqual(code, 0)
+                    self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {
+                        "8": [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}]
+                    })
+
     def test_full_library_is_created_without_missing_charts_and_refreshed_on_update(self):
         existing = b'[{"difficulty":3,"scores":[1,2,3,4,5]}]\n'
         for chart_id in (8, 30, 10030, 11639):
