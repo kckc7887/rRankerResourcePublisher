@@ -191,6 +191,28 @@ def localizations(data):
     return result
 
 
+def namecard_resources(importer, official):
+    identities = sorted({key.removesuffix(".HiRes") for key in importer.addressables.by_key if key.startswith("layout.")})
+    colors = {row["id"]: row for row in official["layoutColors"]}
+    def hex_color(value):
+        return "#" + "".join(f"{round(value[channel] * 255):02x}" for channel in ("r", "g", "b"))
+    layouts = []
+    for identity in identities:
+        row = colors.get(identity)
+        layouts.append({"id": identity, "imagePath": "", "colors": {
+            "background": [hex_color(row["bgColor1"]), hex_color(row["bgColor2"])],
+            "text": hex_color(row["fgColor"]),
+        } if row else None})
+    signatures = []
+    for resource, pattern in (("local.zh-Hans.bio", r"bio\..+\.([12])"),
+                              ("local.zh-Hans.achievement", r"ach\..+\.title([12])")):
+        for identity, text in localizations(importer.text(resource)).items():
+            match = re.fullmatch(pattern, identity)
+            if match and text:
+                signatures.append({"id": identity, "text": text, "part": int(match[1])})
+    return layouts, sorted(signatures, key=lambda row: row["id"])
+
+
 def attach_achievements(songs, translations, overrides):
     by_id = {s["id"]: s for s in songs}
     aliases = {}
@@ -346,7 +368,9 @@ def import_catalog(work, cache, overrides_path, transport="auto", workers=4, sta
             song["charts"].append(chart)
             jobs[identity] = chart
         songs.append(song)
-    tasks = [("chart", key) for key in jobs] + [("cover", key) for key in sorted(set(cover_keys.values()))] + [("audio", key) for key in sorted(set(music_ids.values()))]
+    layouts, signatures = namecard_resources(importer, official)
+    layout_keys = {row["id"]: row["id"] + ".HiRes" if row["id"] + ".HiRes" in importer.addressables.by_key else row["id"] for row in layouts}
+    tasks = [("layout", key) for key in layout_keys.values()] + [("chart", key) for key in jobs] + [("cover", key) for key in sorted(set(cover_keys.values()))] + [("audio", key) for key in sorted(set(music_ids.values()))]
     results, failures = {}, []
 
     def retrieve(task):
@@ -355,7 +379,7 @@ def import_catalog(work, cache, overrides_path, transport="auto", workers=4, sta
             if kind == "chart":
                 raw = importer.text(replacements.get(key, key))
                 return task, (chart_stats(json.loads(raw)), raw), None
-            if kind == "cover":
+            if kind in ("cover", "layout"):
                 return task, importer.cover(key), None
             data = importer.acb(key)
             return task, (acb_duration(data), data), None
@@ -409,9 +433,13 @@ def import_catalog(work, cache, overrides_path, transport="auto", workers=4, sta
         path = f"covers/{sha256(cover)}.png"
         atomic_write(work / path, cover)
         song["coverPath"] = path
+    for layout in layouts:
+        raw = results[("layout", layout_keys[layout["id"]])]
+        layout["imagePath"] = f"covers/{sha256(raw)}.png"
+        atomic_write(work / layout["imagePath"], raw)
     translations = localizations(importer.text("local.zh-Hans.achievement"))
     unresolved_achievements = attach_achievements(songs, translations, overrides)
-    catalog = {"schemaVersion": 1, "resourceVersion": importer.version, "gameVersion": importer.config["version"], "songs": songs}
+    catalog = {"schemaVersion": 1, "resourceVersion": importer.version, "gameVersion": importer.config["version"], "songs": songs, "layouts": layouts, "signatures": signatures}
     summary = validate_catalog(catalog)
     report = {"officialConfigUrl": CONFIG_URL, "officialResourceVersion": importer.version, "gameVersion": importer.config["version"], "statisticsUrl": stats_url, "statisticsPolicy": "Title/explicit-ID alias match AND official chart HIT equality; otherwise null", "bpmPolicy": "Range of official chart bPM multiplied by bpmShifts.value; rounded to 3 decimals", "durationPolicy": "Official ACB WaveformTable NumSamples/SamplingRate, crosschecked against complete HCA frame count minus encoder delay/padding", "unresolvedStatistics": unresolved_stats, "unresolvedAchievements": unresolved_achievements, "summary": summary}
     report["skippedPreviewSongs"] = skipped_previews

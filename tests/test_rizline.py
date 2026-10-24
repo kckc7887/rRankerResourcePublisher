@@ -16,13 +16,13 @@ from unittest.mock import Mock, patch
 from xml.etree import ElementTree
 
 from rizline_publisher.core import apply_overrides, atomic_write, build, json_bytes, max_combo, read_json, relative_path, sha256, supplement_template, validate_catalog, validate_release
-from rizline_publisher.upstream import Addressables, attach_achievements, chart_stats, parse_stats, verified_stats
+from rizline_publisher.upstream import Addressables, attach_achievements, chart_stats, parse_stats, verified_stats, namecard_resources
 from rizline_publisher.audio import acb_duration, utf_rows
 
 
 def fixture():
     song = {"id": "Song.artist.0", "title": "Song", "artist": "Artist", "illustrator": None, "packId": "Disc 1", "packName": "Disc 1", "bpm": "150", "durationSeconds": None, "updatedAt": None, "coverPath": "covers/test.png", "audioPath": "audio/test.acb", "charts": [{"id": "chart.Song.artist.0.IN", "songId": "Song.artist.0", "difficulty": "IN", "level": "12+", "constant": 12.6, "designer": "Designer", "hit": 20, "combo": 56, "maxScore": 1001000, "riztimeHit": 10, "chartPath": "charts/test.json"}], "achievements": []}
-    return {"schemaVersion": 1, "resourceVersion": "v141_example", "gameVersion": "2.7.1", "songs": [song]}
+    return {"schemaVersion": 1, "resourceVersion": "v141_example", "gameVersion": "2.7.1", "songs": [song], "layouts": [{"id": "layout.00001", "imagePath": "covers/test.png", "colors": None}], "signatures": [{"id": "bio.example.1", "text": "闪亮的", "part": 1}]}
 
 
 def overrides():
@@ -89,6 +89,33 @@ class PublisherTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+
+    def test_namecard_resources_merge_hires_colors_and_signature_parts(self):
+        importer = Mock()
+        importer.addressables.by_key = {"layout.00001": [], "layout.00001.HiRes": [], "layout.special": []}
+        importer.text.side_effect = lambda key: {
+            "local.zh-Hans.bio": "bio.example.1=闪亮的\nbio.example.2=星星\nignored=other".encode(),
+            "local.zh-Hans.achievement": "ach.example.title1=刚学会飞的\nach.example.title2=小鸽子\nach.example.name=无关".encode(),
+        }[key]
+        color = {"r": 1, "g": 0.5, "b": 0, "a": 1}
+        layouts, signatures = namecard_resources(importer, {"layoutColors": [
+            {"id": "layout.00001", "bgColor1": color, "bgColor2": color, "fgColor": color}]})
+        self.assertEqual([row["id"] for row in layouts], ["layout.00001", "layout.special"])
+        self.assertEqual(layouts[0]["colors"]["background"], ["#ff8000", "#ff8000"])
+        self.assertIsNone(layouts[1]["colors"])
+        self.assertEqual([(row["part"], row["text"]) for row in signatures],
+                         [(1, "刚学会飞的"), (2, "小鸽子"), (1, "闪亮的"), (2, "星星")])
+
+    def test_layout_reference_and_signature_validation(self):
+        build(self.source, self.override, self.output)
+        current = read_json(self.output / "rizline/current.json")
+        manifest = read_json(self.output / current["manifestPath"])
+        catalog = read_json(self.output / manifest["catalogPath"])
+        self.assertEqual(catalog["layouts"][0]["imagePath"], catalog["songs"][0]["coverPath"])
+        self.assertEqual(catalog["signatures"][0]["text"], "闪亮的")
+        catalog["signatures"][0]["part"] = 3
+        with self.assertRaisesRegex(ValueError, "signature part"):
+            validate_catalog(catalog)
 
     def test_build_is_deterministic_preserves_input_and_override(self):
         patch_value = overrides()
