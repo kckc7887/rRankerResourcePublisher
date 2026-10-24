@@ -33,7 +33,7 @@ class ResourceContracts(unittest.TestCase):
         chart, audio, cover = prefix + "charts/old.json", prefix + "audio/old.m4a", prefix + "covers/old.png"
         repeated_chart = prefix + "charts/same-content.json"
         catalog = {"schemaVersion": 1, "gameVersion": "2.7.1", "resourceVersion": "date",
-                   "layouts": [{"id": "layout.00001", "imagePath": cover, "colors": None}], "signatures": [], "songs": [
+                   "illustrations": [{"id": "illustration.song", "aliases": [], "name": "Song", "imagePath": cover}], "signatures": [], "songs": [
             {"id": "Song.A", "coverPath": cover, "audioPath": audio, "charts": [{"chartPath": chart}, {"chartPath": repeated_chart}]}]}
         payloads = {chart: b"chart", repeated_chart: b"chart", audio: b"audio", cover: b"cover", prefix + "catalog.json": encode(catalog)}
         files = [{"path": key, "size": len(data), "sha256": digest(data)} for key, data in payloads.items()]
@@ -51,7 +51,7 @@ class ResourceContracts(unittest.TestCase):
         finalize(plan, receipts)
         body = json.loads(self.s3.objects[candidate["manifest"]["catalogPath"]]["Body"])
         song = body["songs"][0]
-        self.assertEqual(body["layouts"][0]["imagePath"], song["coverPath"])
+        self.assertEqual(body["illustrations"][0]["imagePath"], song["coverPath"])
         self.assertEqual(self.s3.objects[song["audioPath"]]["Body"], b"audio")
         self.assertEqual(self.s3.objects[song["charts"][0]["chartPath"]]["Body"], b"chart")
         self.assertEqual(song["charts"][0]["chartPath"], song["charts"][1]["chartPath"])
@@ -201,7 +201,7 @@ class ResourceContracts(unittest.TestCase):
                             "discOLevels": [], "musics": [{"id": "music", "musicName": "Song"}], "illustrations": [{"id": "cover"}],
                             "charts": [{"id": "preview.EZ", "level": "EZ", "difficulty": constants[0]}, {"id": "preview.IN", "level": "IN", "difficulty": constants[1]},
                                        {"id": "released.IN", "level": "IN", "difficulty": 12}],
-                            "layoutColors": [], "resourceReplacements": [{"withFeature": "pigeonCN", "pairs": [{"oldKey": "preview.EZ", "newKey": "replacement"}]}]}
+                            "altIllustrationInfos": [], "resourceReplacements": [{"withFeature": "pigeonCN", "pairs": [{"oldKey": "preview.EZ", "newKey": "replacement"}]}]}
                 importer = Mock(config={"version": "2.7.1"}, version="v1")
                 importer.addressables.by_key = {}
                 importer.default.return_value = official

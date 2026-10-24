@@ -136,24 +136,28 @@ def string(value, label, nullable=False):
 
 
 def validate_catalog(catalog):
-    if not isinstance(catalog, dict) or set(catalog) != {"schemaVersion", "resourceVersion", "gameVersion", "songs", "layouts", "signatures"} or type(catalog.get("schemaVersion")) is not int or catalog["schemaVersion"] != 1:
+    if not isinstance(catalog, dict) or set(catalog) != {"schemaVersion", "resourceVersion", "gameVersion", "songs", "illustrations", "signatures"} or type(catalog.get("schemaVersion")) is not int or catalog["schemaVersion"] != 1:
         raise ValueError("Unsupported catalog schemaVersion")
     string(catalog.get("resourceVersion"), "resourceVersion")
     string(catalog.get("gameVersion"), "gameVersion")
     if not isinstance(catalog.get("songs"), list) or not catalog["songs"]:
         raise ValueError("Catalog must contain songs")
-    for kind in ("layouts", "signatures"):
+    for kind in ("illustrations", "signatures"):
         if not isinstance(catalog[kind], list):
             raise ValueError(f"{kind} must be an array")
         identities = set()
         for row in catalog[kind]:
-            fields = {"id", "imagePath", "colors"} if kind == "layouts" else {"id", "text", "part"}
+            fields = {"id", "aliases", "name", "imagePath"} if kind == "illustrations" else {"id", "aliases", "text", "part"}
             if not isinstance(row, dict) or set(row) != fields:
                 raise ValueError(f"Invalid {kind} fields")
             string(row["id"], f"{kind} id")
-            if row["id"] in identities:
-                raise ValueError(f"Duplicate {kind} id")
-            identities.add(row["id"])
+            if not isinstance(row["aliases"], list):
+                raise ValueError("Aliases must be an array")
+            for identity in [row["id"], *row["aliases"]]:
+                string(identity, "resource alias")
+                if identity in identities:
+                    raise ValueError(f"Duplicate {kind} id or alias")
+                identities.add(identity)
             if kind == "signatures":
                 string(row["text"], "signature text")
                 if type(row["part"]) is not int or row["part"] not in (1, 2):
@@ -161,14 +165,8 @@ def validate_catalog(catalog):
             else:
                 relative_path(row["imagePath"])
                 if not row["imagePath"].endswith(".png"):
-                    raise ValueError("Layout must be PNG")
-                colors = row["colors"]
-                if colors is not None:
-                    if (not isinstance(colors, dict) or set(colors) != {"background", "text"}
-                            or not isinstance(colors["background"], list) or len(colors["background"]) != 2
-                            or any(not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value)
-                                   for value in [*colors["background"], colors["text"]])):
-                        raise ValueError("Invalid layout colors")
+                    raise ValueError("Illustration must be PNG")
+                string(row["name"], "illustration name")
     song_ids, chart_ids = set(), set()
     for song in catalog["songs"]:
         if set(song) != SONG_FIELDS:
@@ -230,7 +228,7 @@ def validate_catalog(catalog):
             if achievement["id"] in achievement_ids:
                 raise ValueError("Duplicate song achievement")
             achievement_ids.add(achievement["id"])
-    return {"layouts": len(catalog["layouts"]), "signatures": len(catalog["signatures"]), "songs": len(song_ids), "charts": len(chart_ids), "covers": sum(s["coverPath"] is not None for s in catalog["songs"]), "audios": len({s["audioPath"] for s in catalog["songs"]}), "chartFiles": len({c["chartPath"] for s in catalog["songs"] for c in s["charts"]}), "missingUpdateDates": sum(s["updatedAt"] is None for s in catalog["songs"]), "missingDurations": sum(s["durationSeconds"] is None for s in catalog["songs"]), "missingMaxScores": sum(c["maxScore"] is None for s in catalog["songs"] for c in s["charts"])}
+    return {"illustrations": len(catalog["illustrations"]), "signatures": len(catalog["signatures"]), "songs": len(song_ids), "charts": len(chart_ids), "covers": sum(s["coverPath"] is not None for s in catalog["songs"]), "audios": len({s["audioPath"] for s in catalog["songs"]}), "chartFiles": len({c["chartPath"] for s in catalog["songs"] for c in s["charts"]}), "missingUpdateDates": sum(s["updatedAt"] is None for s in catalog["songs"]), "missingDurations": sum(s["durationSeconds"] is None for s in catalog["songs"]), "missingMaxScores": sum(c["maxScore"] is None for s in catalog["songs"] for c in s["charts"])}
 
 
 def max_combo(hit):
@@ -318,7 +316,7 @@ def build(source, overrides, output, workers=4, transcode_cache=None):
             log_progress(f"transcode-audio {done}/{total} {path}")
         items = parallel_map(convert, sorted(paths), workers, progress=report) if paths else []
         return {digest: data for _, digest, data in items}, {path: digest for path, digest, _ in items}
-    cover_bytes, cover_hashes = hashed_files({s["coverPath"] for s in catalog["songs"] if s["coverPath"]} | {row["imagePath"] for row in catalog["layouts"]}, verify_png, "hash-cover")
+    cover_bytes, cover_hashes = hashed_files({s["coverPath"] for s in catalog["songs"] if s["coverPath"]} | {row["imagePath"] for row in catalog["illustrations"]}, verify_png, "hash-cover")
     audio_bytes, audio_hashes = hashed_audio({s["audioPath"] for s in catalog["songs"]})
     chart_bytes, chart_hashes = hashed_files({c["chartPath"] for s in catalog["songs"] for c in s["charts"]}, json.loads, "hash-chart")
     for song in catalog["songs"]:
@@ -327,8 +325,8 @@ def build(source, overrides, output, workers=4, transcode_cache=None):
         song["audioPath"] = audio_hashes[song["audioPath"]]
         for chart in song["charts"]:
             chart["chartPath"] = chart_hashes[chart["chartPath"]]
-    for layout in catalog["layouts"]:
-        layout["imagePath"] = cover_hashes[layout["imagePath"]]
+    for illustration in catalog["illustrations"]:
+        illustration["imagePath"] = cover_hashes[illustration["imagePath"]]
     fingerprint = sha256(json_bytes(catalog))[:16]
     official_version = re.sub(r"[^a-zA-Z0-9_.-]", "_", catalog["resourceVersion"])
     revision = f"{official_version}-{fingerprint}"
@@ -347,10 +345,10 @@ def build(source, overrides, output, workers=4, transcode_cache=None):
             digest = chart["chartPath"]
             chart["chartPath"] = f"{prefix}/charts/{digest}.json"
             payloads[chart["chartPath"]] = chart_bytes[digest]
-    for layout in catalog["layouts"]:
-        digest = layout["imagePath"]
-        layout["imagePath"] = f"{prefix}/covers/{digest}.png"
-        payloads[layout["imagePath"]] = cover_bytes[digest]
+    for illustration in catalog["illustrations"]:
+        digest = illustration["imagePath"]
+        illustration["imagePath"] = f"{prefix}/covers/{digest}.png"
+        payloads[illustration["imagePath"]] = cover_bytes[digest]
     catalog_path = f"{prefix}/catalog.json"
     payloads[catalog_path] = json_bytes(catalog)
     manifest = {"schemaVersion": 1, "resourceVersion": revision, "gameVersion": catalog["gameVersion"], "files": [{"path": path, "size": len(data), "sha256": sha256(data)} for path, data in sorted(payloads.items())], "catalogPath": catalog_path}
@@ -413,8 +411,8 @@ def validate_catalog_release(catalog, manifest):
     if catalog["resourceVersion"] != manifest["resourceVersion"] or catalog["gameVersion"] != manifest["gameVersion"]:
         raise ValueError("Catalog release mismatch")
     paths = {asset["path"] for asset in manifest["files"]}
-    if any(row["imagePath"] not in paths for row in catalog["layouts"]):
-        raise ValueError("Layout is not in the manifest")
+    if any(row["imagePath"] not in paths for row in catalog["illustrations"]):
+        raise ValueError("Illustration is not in the manifest")
     for song in catalog["songs"]:
         if song["coverPath"] and song["coverPath"] not in paths:
             raise ValueError("Cover is not in the manifest")

@@ -191,26 +191,56 @@ def localizations(data):
     return result
 
 
-def namecard_resources(importer, official):
-    identities = sorted({key.removesuffix(".HiRes") for key in importer.addressables.by_key if key.startswith("layout.")})
-    colors = {row["id"]: row for row in official["layoutColors"]}
-    def hex_color(value):
-        return "#" + "".join(f"{round(value[channel] * 255):02x}" for channel in ("r", "g", "b"))
-    layouts = []
-    for identity in identities:
-        row = colors.get(identity)
-        layouts.append({"id": identity, "imagePath": "", "colors": {
-            "background": [hex_color(row["bgColor1"]), hex_color(row["bgColor2"])],
-            "text": hex_color(row["fgColor"]),
-        } if row else None})
-    signatures = []
+def illustration_resources(importer, official):
+    keys = importer.addressables.by_key
+    replacements = {pair["oldKey"].removesuffix(".HiRes"): pair["newKey"].removesuffix(".HiRes")
+                    for item in official["resourceReplacements"] if item["withFeature"] == "pigeonCN"
+                    for pair in item["pairs"]}
+    musics = {row["id"]: row["musicName"] for row in official["musics"]}
+    names = {row["illustrationId"]: musics[row["musicId"]]
+             for row in official["levels"] + official["discOLevels"]}
+    names.update({row["id"]: row["name"] for row in official["altIllustrationInfos"]})
+    groups = {}
+    for raw in sorted(keys):
+        if not raw.startswith(("illustration.", "altIllustration.")):
+            continue
+        identity = raw.removesuffix(".HiRes")
+        target = replacements.get(identity, identity)
+        group = groups.setdefault(target, set())
+        group.update((raw, identity))
+    rows, images = [], {}
+    for target, aliases in sorted(groups.items()):
+        aliases.update(old for old, new in replacements.items() if new == target)
+        identity = next((key for key in sorted(aliases) if key in names), target)
+        name = names.get(identity) or musics.get(identity.replace("illustration.", "music.", 1))
+        if not name:
+            name = identity.split(".")[1]
+        rows.append({"id": identity, "aliases": sorted(aliases - {identity}), "name": name, "imagePath": ""})
+        images[identity] = target + ".HiRes" if target + ".HiRes" in keys else target
+    return rows, images
+
+
+def signature_resources(importer):
+    groups = {}
     for resource, pattern in (("local.zh-Hans.bio", r"bio\..+\.([12])"),
                               ("local.zh-Hans.achievement", r"ach\..+\.title([12])")):
         for identity, text in localizations(importer.text(resource)).items():
             match = re.fullmatch(pattern, identity)
             if match and text:
-                signatures.append({"id": identity, "text": text, "part": int(match[1])})
-    return layouts, sorted(signatures, key=lambda row: row["id"])
+                groups.setdefault((int(match[1]), text), []).append(identity)
+    return sorted(({"id": sorted(ids)[0], "aliases": sorted(ids)[1:], "text": text, "part": part}
+                   for (part, text), ids in groups.items()), key=lambda row: row["id"])
+
+
+def merge_illustrations(rows):
+    unique = {}
+    for row in rows:
+        previous = unique.get(row["imagePath"])
+        if previous:
+            previous["aliases"] = sorted(set(previous["aliases"] + [row["id"]] + row["aliases"]) - {previous["id"]})
+        else:
+            unique[row["imagePath"]] = row
+    return list(unique.values())
 
 
 def attach_achievements(songs, translations, overrides):
@@ -368,9 +398,9 @@ def import_catalog(work, cache, overrides_path, transport="auto", workers=4, sta
             song["charts"].append(chart)
             jobs[identity] = chart
         songs.append(song)
-    layouts, signatures = namecard_resources(importer, official)
-    layout_keys = {row["id"]: row["id"] + ".HiRes" if row["id"] + ".HiRes" in importer.addressables.by_key else row["id"] for row in layouts}
-    tasks = [("layout", key) for key in layout_keys.values()] + [("chart", key) for key in jobs] + [("cover", key) for key in sorted(set(cover_keys.values()))] + [("audio", key) for key in sorted(set(music_ids.values()))]
+    images, image_keys = illustration_resources(importer, official)
+    signatures = signature_resources(importer)
+    tasks = [("chart", key) for key in jobs] + [("cover", key) for key in sorted(set(cover_keys.values()) | set(image_keys.values()))] + [("audio", key) for key in sorted(set(music_ids.values()))]
     results, failures = {}, []
 
     def retrieve(task):
@@ -379,7 +409,7 @@ def import_catalog(work, cache, overrides_path, transport="auto", workers=4, sta
             if kind == "chart":
                 raw = importer.text(replacements.get(key, key))
                 return task, (chart_stats(json.loads(raw)), raw), None
-            if kind in ("cover", "layout"):
+            if kind == "cover":
                 return task, importer.cover(key), None
             data = importer.acb(key)
             return task, (acb_duration(data), data), None
@@ -433,13 +463,14 @@ def import_catalog(work, cache, overrides_path, transport="auto", workers=4, sta
         path = f"covers/{sha256(cover)}.png"
         atomic_write(work / path, cover)
         song["coverPath"] = path
-    for layout in layouts:
-        raw = results[("layout", layout_keys[layout["id"]])]
-        layout["imagePath"] = f"covers/{sha256(raw)}.png"
-        atomic_write(work / layout["imagePath"], raw)
+    for image in images:
+        raw = results[("cover", image_keys[image["id"]])]
+        image["imagePath"] = f"covers/{sha256(raw)}.png"
+        atomic_write(work / image["imagePath"], raw)
+    images = merge_illustrations(images)
     translations = localizations(importer.text("local.zh-Hans.achievement"))
     unresolved_achievements = attach_achievements(songs, translations, overrides)
-    catalog = {"schemaVersion": 1, "resourceVersion": importer.version, "gameVersion": importer.config["version"], "songs": songs, "layouts": layouts, "signatures": signatures}
+    catalog = {"schemaVersion": 1, "resourceVersion": importer.version, "gameVersion": importer.config["version"], "songs": songs, "illustrations": images, "signatures": signatures}
     summary = validate_catalog(catalog)
     report = {"officialConfigUrl": CONFIG_URL, "officialResourceVersion": importer.version, "gameVersion": importer.config["version"], "statisticsUrl": stats_url, "statisticsPolicy": "Title/explicit-ID alias match AND official chart HIT equality; otherwise null", "bpmPolicy": "Range of official chart bPM multiplied by bpmShifts.value; rounded to 3 decimals", "durationPolicy": "Official ACB WaveformTable NumSamples/SamplingRate, crosschecked against complete HCA frame count minus encoder delay/padding", "unresolvedStatistics": unresolved_stats, "unresolvedAchievements": unresolved_achievements, "summary": summary}
     report["skippedPreviewSongs"] = skipped_previews

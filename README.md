@@ -80,7 +80,7 @@ bash .github/scripts/yunxiao-upload.sh
 
 `DXTag/all.json` 是独立全曲库版，JSON 对象的键为谱面文件 ID 字符串，值为对应单曲文件的难度与五维数组列表，包含当前 LXNS 曲库的全部标准谱和 DX 谱。每天定时发布或手动开启 `execute` 时，先完成单曲对象上传，再读取当前曲库对应的全部单曲对象并更新全曲库版；没有新增谱面时也会更新。单曲计算、上传或汇总读取失败时保留上一次全曲库文件，已完成的单曲写入保留，任务报错。备用上传使用本次已计算的文件，并沿用本次补齐或覆盖方式。全曲库地址不使用永久缓存，也不进入其他资源组的清理。
 
-对象名为 `<sha256>.<扩展名>`。Phigros 清单 `assets` 中的 `path` 是歌曲、难度、变体的逻辑地址，`objectKey` 是实际桶路径，同时记录 `size`、`sha256`、`contentType`。指针的 `catalog`、`noteCounts` 必须与对应清单项一致。Rizline 清单使用 `files` 与 `catalogPath`，曲库保持 schemaVersion 1，内部引用直接使用固定对象路径。曲库的 `layouts` 保存游戏名片 ID、`imagePath` 与可空的 `colors`（两段背景色及文字色）；`signatures` 保存普通与成就签名的 ID、文本和位置 1/2。layout 按 ID 合并普通与 HiRes 索引，优先 HiRes，PNG 与曲绘共用 `covers` 哈希对象；缺少配色时保留空值。签名分别读取简体中文 bio 和 achievement 本地化资源。Kyou 清单保留抓取统计，`files` 增加 `name` 到 `path/size/sha256/contentType` 的映射。
+对象名为 `<sha256>.<扩展名>`。Phigros 清单 `assets` 中的 `path` 是歌曲、难度、变体的逻辑地址，`objectKey` 是实际桶路径，同时记录 `size`、`sha256`、`contentType`。指针的 `catalog`、`noteCounts` 必须与对应清单项一致。Rizline 清单使用 `files` 与 `catalogPath`，曲库保持 schemaVersion 1，内部引用直接使用固定对象路径。曲库的 `illustrations` 保存普通插画与替换插画的原始 ID、别名、可读名称和 `imagePath`。曲绘名称取关联曲名，特殊插画取官方名称；普通与 HiRes、国服替换映射及相同 PNG 合并展示，别名保留所有原始资源 ID，图片共用 `covers` 哈希对象。`signatures` 保存普通与成就签名的 ID、别名、文本和位置 1/2，同一位置的相同文本合并。签名分别读取简体中文 bio 和 achievement 本地化资源。Kyou 清单保留抓取统计，`files` 增加 `name` 到 `path/size/sha256/contentType` 的映射。
 
 Phigros 的物量表每行按歌曲排列 EZ、HD、IN、可选 AT，各难度为 `[Tap,Hold,Drag,Flick]`；谱面根节点 `blockAreaList` 非空时，追加其数组长度作为第五项 BLOCK。缺失、null 或空数组不追加第五项，异常非数组值使统计失败。BLOCK 独立显示，总物量仅累加四种音符。
 

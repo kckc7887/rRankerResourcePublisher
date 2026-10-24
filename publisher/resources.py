@@ -57,8 +57,8 @@ def normalize(game, legacy, assets, output, catalog=None):
             song["audioPath"] = mapping[song["audioPath"]]
             for chart in song["charts"]:
                 chart["chartPath"] = mapping[chart["chartPath"]]
-        for layout in catalog.get("layouts", []):
-            layout["imagePath"] = mapping[layout["imagePath"]]
+        for illustration in catalog.get("illustrations", []):
+            illustration["imagePath"] = mapping[illustration["imagePath"]]
         catalog.pop("resourceVersion", None)
         version = digest(encode(catalog))
         catalog["resourceVersion"] = version
