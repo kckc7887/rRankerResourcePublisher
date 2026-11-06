@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
+import sys
 import time
 
 import requests
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 
 from .storage import Storage, digest, encode, file_digest, parallel, recoverable_upload_error, safe_path
 
@@ -17,7 +17,6 @@ CHART_URL = "https://assets2.lxns.net/maimai/chart/{chart_id}.txt"
 DIFFICULTY_IDS = {"BASIC": 0, "ADVANCED": 1, "EXPERT": 2, "MASTER": 3, "Re:MASTER": 4}
 AXES = ("键盘", "星星", "技巧", "体力", "爆发")
 SCORE_SCRIPT = Path(__file__).with_name("dxtag-score.mjs")
-OBJECT_KEY = re.compile(r"DXTag/(0|[1-9][0-9]*)\.json")
 
 
 class DxtagIncomplete(RuntimeError):
@@ -58,8 +57,15 @@ def expected_chart_ids(payload):
     return chart_ids
 
 
-def present_chart_ids(objects):
-    return {int(match.group(1)) for key in objects if (match := OBJECT_KEY.fullmatch(key))}
+def missing_chart_ids(storage, expected):
+    chart_ids = sorted(expected)
+    try:
+        objects = storage.list("DXTag/")
+    except (ConnectTimeoutError, ReadTimeoutError):
+        print("DXTag listing timed out; checking the expected chart objects", file=sys.stderr, flush=True)
+        heads = parallel(lambda chart_id: storage.head(object_key(chart_id)), chart_ids)
+        return [chart_id for chart_id, head in zip(chart_ids, heads, strict=True) if head is None]
+    return [chart_id for chart_id in chart_ids if object_key(chart_id) not in objects]
 
 
 def charts_document(rows):
@@ -148,15 +154,21 @@ def _upload_chart(storage, chart_id, body, *, refresh=False):
     return True
 
 
-def _library_body(storage, expected):
+def _publish_library(storage, expected):
     library = dict(parallel(lambda chart_id: (str(chart_id), storage.json(object_key(chart_id))[0]), sorted(expected)))
-    return encode(library)
-
-
-def _write_library(storage, body, count):
-    etag = storage.put("DXTag/all.json", body, "application/json")
-    storage.verify("DXTag/all.json", len(body), digest(body), etag)
-    return {"key": "DXTag/all.json", "charts": count}
+    body = encode(library)
+    key = "DXTag/all.json"
+    head = storage.head(key)
+    matches = (head is not None and head["ContentLength"] == len(body)
+               and head.get("ContentType") == "application/json"
+               and head.get("CacheControl") == "no-cache,no-store,must-revalidate"
+               and not head.get("Metadata") and storage.get(key, head["ETag"])[0] == body)
+    if matches:
+        print(f"Reusing {key}: verified {len(library)} charts", file=sys.stderr, flush=True)
+    else:
+        etag = storage.put(key, body, "application/json", etag=head["ETag"] if head else None, absent=head is None)
+        storage.verify(key, len(body), digest(body), etag)
+    return {"key": key, "charts": len(library)}
 
 
 def publish_prepared(plan_path):
@@ -187,14 +199,14 @@ def publish_prepared(plan_path):
         else:
             _upload_chart(storage, item["id"], (plan_path.parent / "payload" / key).read_bytes())
         completed.append(item["id"])
-    return {"completed": completed, "library": _write_library(storage, _library_body(storage, plan["expected"]), len(plan["expected"]))}
+    return {"completed": completed, "library": _publish_library(storage, plan["expected"])}
 
 
 def publish(*, execute=False, refresh=False, output=Path("work/dxtag")):
     storage = Storage("dxtag")
     response = _fetch(SONG_LIST_URL)
     expected = expected_chart_ids(response.json())
-    missing = sorted(expected - present_chart_ids(storage.list("DXTag/")))
+    missing = missing_chart_ids(storage, expected)
     targets = sorted(expected) if refresh else missing
     result = {"missing": missing, "targets": targets, "uploaded": [], "failed": [], "library": None}
     if not execute:
@@ -221,9 +233,8 @@ def publish(*, execute=False, refresh=False, output=Path("work/dxtag")):
     (output / "plan.json").write_bytes(encode(prepared))
     if result["failed"]:
         raise DxtagIncomplete(result)
-    body = _library_body(storage, expected)
     try:
-        result["library"] = _write_library(storage, body, len(expected))
+        result["library"] = _publish_library(storage, expected)
     except Exception as error:
         if not recoverable_upload_error(error):
             raise

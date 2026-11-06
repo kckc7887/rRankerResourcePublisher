@@ -6,7 +6,7 @@ if [ "$GAME" = apk ]; then
   apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 install -y --no-install-recommends android-sdk-build-tools default-jre-headless
   export ANDROID_HOME=/usr/lib/android-sdk
 fi
-python -m pip install --disable-pip-version-check --timeout 30 --retries 2 --index-url https://mirrors.aliyun.com/pypi/simple 'boto3>=1.40,<2' 'paramiko>=5,<6' 'requests>=2.32,<3'
+python -m pip install --disable-pip-version-check --timeout 30 --retries 2 --index-url https://mirrors.aliyun.com/pypi/simple 'boto3>=1.40,<2' 'requests>=2.32,<3'
 if [ "$GAME" = apk ]; then
   if [ -n "${SOURCE_RUN_ID:-}" ]; then
     python -c 'import os; from publisher.yunxiao import source_workflow; source_workflow("apk", int(os.environ["SOURCE_RUN_ID"]), os.environ["PUBLISHER_SHA"])'

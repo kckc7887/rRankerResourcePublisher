@@ -9,12 +9,12 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 import requests
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from publisher.__main__ import main
 from publisher.dxtag import SONG_LIST_URL
 from publisher.dxtag import publish_prepared
-from test_publication import S3, sftp_mock
+from test_publication import S3
 
 AXES = ("键盘", "星星", "技巧", "体力", "爆发")
 NAMES = ("BASIC", "ADVANCED", "EXPERT", "MASTER", "Re:MASTER")
@@ -44,7 +44,6 @@ class DxtagTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.s3 = S3()
-        self.enterContext(sftp_mock(self.s3))
         self.urls = []
         self.absent = set()
         self.chart_bytes = {}
@@ -112,6 +111,20 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(8, result["missing"])
 
+    def test_listing_timeout_uses_only_the_expected_chart_objects(self):
+        self.s3.seed("DXTag/8.json", b"keep")
+        self.s3.seed("DXTag/030.json", b"alias")
+        timeout = ReadTimeoutError(endpoint_url="https://s3.example")
+        with patch.object(self.s3, "paginate", side_effect=timeout):
+            code, result = self.publish()
+            self.assertEqual(code, 0)
+            self.assertEqual(result["missing"], [30, 10030, 11639])
+            with patch.object(self.s3, "head_object", side_effect=timeout), self.assertRaises(ReadTimeoutError):
+                self.publish("--execute")
+        with patch.object(self.s3, "paginate", side_effect=lambda **kwargs: self.s3.error(403)), self.assertRaises(ClientError):
+            self.publish("--execute")
+        self.assertEqual(self.s3.writes, [])
+
     def test_uploads_difficulty_ids_and_one_decimal_axis_arrays(self):
         self.catalog = {"songs": [{"id": 30, "difficulties": {"standard": [], "dx": [{}]}}]}
         self.chart_bytes[10030] = b"ordered"
@@ -133,7 +146,7 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(result["uploaded"], [10030])
         self.assertEqual(self.s3.objects["DXTag/30.json"]["Body"], existing)
-        self.assertEqual([key for mode, key, _size in self.s3.writes if mode == "sftp"], ["DXTag/10030.json", "DXTag/all.json"])
+        self.assertEqual([key for mode, key, _size in self.s3.writes if mode == "put"], ["DXTag/10030.json", "DXTag/all.json"])
         self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {
             "30": json.loads(existing),
             "10030": [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}],
@@ -282,6 +295,24 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(set(library), {"8", "30", "50", "10030", "11639"})
         self.assertEqual(library["50"], [{"difficulty": 3, "scores": [1.2, 3.4, 5.6, 7.8, 9.0]}])
 
+    def test_full_library_reuses_matching_objects_and_repairs_stale_bytes_or_metadata(self):
+        self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
+        self.s3.seed("DXTag/8.json", b'[{"difficulty":3,"scores":[1,2,3,4,5]}]\n')
+        self.assertEqual(self.publish("--execute")[0], 0)
+        key = "DXTag/all.json"
+        expected = self.s3.objects[key]["Body"]
+        self.s3.writes.clear()
+        self.assertEqual(self.publish("--execute")[0], 0)
+        self.assertEqual(publish_prepared(self.root / "plan.json")["completed"], [])
+        self.assertEqual(self.s3.writes, [])
+
+        self.s3.objects[key]["CacheControl"] = "public"
+        self.assertEqual(self.publish("--execute")[0], 0)
+        self.assertEqual(self.s3.objects[key]["CacheControl"], "no-cache,no-store,must-revalidate")
+        self.s3.objects[key]["Body"] = expected.replace(b'"8"', b'"9"')
+        self.assertEqual(self.publish("--execute")[0], 0)
+        self.assertEqual(self.s3.objects[key]["Body"], expected)
+
     def test_unreadable_chart_keeps_previous_full_library(self):
         self.catalog = {"songs": [{"id": 8, "difficulties": {"standard": [{}], "dx": []}}]}
         previous = b'{"8":[{"difficulty":3,"scores":[1,2,3,4,5]}]}\n'
@@ -292,11 +323,17 @@ class DxtagTests(unittest.TestCase):
         self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
         self.assertEqual(self.s3.writes, [])
 
-        with patch.object(self.s3, "get_object", side_effect=lambda **kwargs: self.s3.error(503)):
-            with self.assertRaises(ClientError):
-                self.publish("--execute")
+        output = self.root / "github-output"
+        with patch.object(self.s3, "get_object", side_effect=lambda **kwargs: self.s3.error(503)), patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+            code, result = self.publish("--execute")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["failed"][0]["stage"], "upload")
+        self.assertIn("cloud_fallback=true", output.read_text(encoding="utf-8"))
         self.assertEqual(self.s3.objects["DXTag/all.json"]["Body"], previous)
         self.assertEqual(self.s3.writes, [])
+        self.s3.seed("DXTag/8.json", b'[{"difficulty":1,"scores":[5,4,3,2,1]}]\n')
+        self.assertEqual(publish_prepared(self.root / "plan.json")["completed"], [])
+        self.assertEqual(json.loads(self.s3.objects["DXTag/all.json"]["Body"]), {"8": [{"difficulty": 1, "scores": [5, 4, 3, 2, 1]}]})
 
     def test_failed_chart_keeps_successful_upload_and_exits(self):
         self.catalog = {"songs": [{"id": 30, "difficulties": {"standard": [{}], "dx": [{}]}}]}
@@ -334,7 +371,8 @@ class DxtagTests(unittest.TestCase):
         self.absent.add(8)
         retried = publish_prepared(self.root / "plan.json")
         self.assertEqual(retried["completed"], [8])
-        self.assertEqual(self.s3.objects["DXTag/8.json"]["Metadata"]["sha256"], json.loads((self.root / "plan.json").read_bytes())["objects"][0]["sha256"])
+        self.assertEqual(self.s3.objects["DXTag/8.json"]["Body"], (self.root / "payload/DXTag/8.json").read_bytes())
+        self.assertEqual(self.s3.objects["DXTag/8.json"]["Metadata"], {})
         self.assertIn("8", json.loads(self.s3.objects["DXTag/all.json"]["Body"]))
 
     def test_score_failure_is_not_eligible_for_cloud_retry(self):

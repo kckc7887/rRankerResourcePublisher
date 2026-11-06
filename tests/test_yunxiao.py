@@ -9,14 +9,14 @@ from unittest.mock import patch
 import zipfile
 
 import requests
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 
 from publisher.__main__ import main
-from publisher.publication import prepare
+from publisher.publication import garbage_collect, prepare
 from publisher.resources import normalize
 from publisher.storage import digest, encode
 from publisher.yunxiao import REPOSITORY, dispatch, source_workflow, upload
-from test_publication import S3, sftp_mock
+from test_publication import S3
 
 SHA = "a" * 40
 
@@ -32,11 +32,13 @@ def response(body, status=200, headers=None):
 
 class YunxiaoDispatchTests(unittest.TestCase):
     def setUp(self):
+        self.summary = Path(self.enterContext(tempfile.TemporaryDirectory())) / "summary"
         self.enterContext(patch.dict(os.environ, {
             "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_REF": "refs/heads/master", "GITHUB_SHA": SHA,
             "GITHUB_RUN_ID": "123", "YUNXIAO_ENDPOINT": "https://instance.devops.aliyuncs.com",
             "YUNXIAO_APK_PIPELINE_ID": "456", "YUNXIAO_PHIGROS_PIPELINE_ID": "789",
             "YUNXIAO_TOKEN": "private-flow-token", "S3_SECRET_ACCESS_KEY": "private-storage-key",
+            "GITHUB_STEP_SUMMARY": str(self.summary),
         }))
         self.enterContext(patch("publisher.yunxiao.time.sleep"))
 
@@ -54,6 +56,9 @@ class YunxiaoDispatchTests(unittest.TestCase):
             "GAME": "apk", "PUBLISHER_SHA": SHA, "SOURCE_RUN_ID": "123", "RELEASE_ID": "415",
         })
         self.assertNotIn("private-storage-key", str(submitted))
+        report = self.summary.read_text(encoding="utf-8")
+        self.assertIn("https://instance.devops.aliyuncs.com/flow/pipelines/456/builds/9", report)
+        self.assertIn("SUCCESS", report)
 
     def test_failed_or_cancelled_cloud_publications_do_not_report_success(self):
         for status in ("FAIL", "CANCELED"):
@@ -61,6 +66,9 @@ class YunxiaoDispatchTests(unittest.TestCase):
                     patch("publisher.yunxiao.requests.get", return_value=response({"status": status})):
                 with self.assertRaisesRegex(RuntimeError, status):
                     dispatch("kyou", attempt=1)
+                report = self.summary.read_text(encoding="utf-8").splitlines()[-1]
+                self.assertIn("https://instance.devops.aliyuncs.com/flow/pipelines/789/builds/9", report)
+                self.assertIn(status, report)
 
     def test_timeout_stops_the_cloud_writer(self):
         stopped = []
@@ -98,7 +106,6 @@ class YunxiaoUploadTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.s3 = S3()
-        self.ssh = self.enterContext(sftp_mock(self.s3))
         self.enterContext(patch("publisher.storage.boto3.client", return_value=self.s3))
         self.enterContext(patch("publisher.storage.time.sleep"))
         self.enterContext(patch.dict(os.environ, {
@@ -176,14 +183,36 @@ class YunxiaoUploadTests(unittest.TestCase):
         self.assertEqual(self.s3.writes, [])
 
     def test_cancelled_github_run_never_switches_the_pointer(self):
-        original_upload = self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect
-        def cancel_after_transfer(*args, **kwargs):
-            original_upload(*args, **kwargs)
-            self.run["status"] = "completed"
-        self.ssh.open_sftp.return_value.__enter__.return_value.putfo.side_effect = cancel_after_transfer
-        with self.assertRaisesRegex(ValueError, "active master"):
+        def cancel_after_transfer(url, **kwargs):
+            if self.s3.writes:
+                self.run["status"] = "completed"
+            return self.get(url, **kwargs)
+        with patch("publisher.yunxiao.requests.get", side_effect=cancel_after_transfer), self.assertRaisesRegex(ValueError, "active master"):
             upload("phigros", 123, 1, self.root / "cloud")
         self.assertNotIn("phigros/latest.json", self.s3.objects)
+
+    def test_cleanup_scan_timeout_leaves_objects_for_the_next_run(self):
+        retired = f"phigros/metadata/{digest(b'retired')}.json"
+        self.s3.seed(retired, b"retired", days=10)
+        timeout = ReadTimeoutError(endpoint_url="https://storage.example")
+        with patch.object(self.s3, "paginate", side_effect=timeout):
+            result = upload("phigros", 123, 1, self.root / "cloud")
+            self.assertTrue(result["cleanup"]["deferred"])
+            self.assertEqual(json.loads(self.s3.objects["phigros/latest.json"]["Body"]), result["pointer"])
+            with self.assertRaises(ReadTimeoutError):
+                garbage_collect("phigros")
+        summary = self.root / "summary"
+        with patch.object(self.s3, "paginate", side_effect=ConnectTimeoutError(endpoint_url="https://storage.example")), \
+                patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), patch("sys.argv", ["publisher", "gc", "phigros", "--execute"]):
+            main()
+        self.assertIn("清理延期", summary.read_text(encoding="utf-8"))
+        with patch.object(self.s3, "paginate", side_effect=lambda **kwargs: self.s3.error(403)), self.assertRaises(ClientError):
+            garbage_collect("phigros", execute=True)
+        with patch.object(self.s3, "delete_object", side_effect=timeout), self.assertRaises(ReadTimeoutError):
+            garbage_collect("phigros", execute=True)
+        self.assertIn(retired, self.s3.objects)
+        garbage_collect("phigros", execute=True)
+        self.assertNotIn(retired, self.s3.objects)
 
 
 class UploadFailureClassificationTests(unittest.TestCase):

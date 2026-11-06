@@ -10,7 +10,7 @@ import zipfile
 
 from publisher.apk import ABI_NAMES, CERTIFICATE, publish, verify_apk
 from publisher.storage import digest
-from test_publication import S3, sftp_mock
+from test_publication import S3
 
 
 def apk_bytes(abi):
@@ -28,7 +28,6 @@ class ApkTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "sdk/build-tools/36.0.0").mkdir(parents=True)
         self.s3 = S3()
-        self.enterContext(sftp_mock(self.s3))
         self.release = {"id": 123, "tag_name": "0.3.0", "draft": False, "prerelease": False, "published_at": "2026-09-02T00:00:00Z", "assets": []}
         for abi, name in ABI_NAMES.items():
             data = apk_bytes(abi)

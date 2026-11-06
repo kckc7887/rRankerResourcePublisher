@@ -21,7 +21,7 @@ env:
   PYTHONUNBUFFERED: '1'
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.game == 'kyou' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     environment: ${{ inputs.environment }}
     timeout-minutes: 150
     outputs:
@@ -35,8 +35,6 @@ jobs:
       S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
       S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
       S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-      SFTP_ENDPOINT: ${{ secrets.SFTP_ENDPOINT }}
-      SFTP_HOST_KEY: ${{ secrets.SFTP_HOST_KEY }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -218,7 +216,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - run: python -m pip install 'boto3>=1.40,<2' 'paramiko>=5,<6'
+      - run: python -m pip install 'boto3>=1.40,<2'
       - uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.game }}-plan-${{ needs.prepare.outputs.attempt }}
@@ -244,8 +242,6 @@ jobs:
           S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          SFTP_ENDPOINT: ${{ secrets.SFTP_ENDPOINT }}
-          SFTP_HOST_KEY: ${{ secrets.SFTP_HOST_KEY }}
       - name: Fail invalid resource publications
         if: steps.publish.outcome == 'failure' && steps.publish.outputs.cloud_fallback != 'true'
         run: exit 1
@@ -270,7 +266,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - run: python -m pip install 'boto3>=1.40,<2' 'paramiko>=5,<6' 'requests>=2.32,<3'
+      - run: python -m pip install 'boto3>=1.40,<2' 'requests>=2.32,<3'
       - name: Retry the same publication through Yunxiao
         env:
           GAME: ${{ inputs.game }}

@@ -72,9 +72,10 @@ def dispatch(game, *, release_id=None, attempt=None, timeout=85 * 60):
     run_id = response.json()
     if type(run_id) is not int or run_id <= 0:
         raise ValueError("Yunxiao did not return a run ID")
-    print(f"Yunxiao run {run_id}: {endpoint}/flow/pipelines/{pipeline}/current", flush=True)
+    run_url = f"{endpoint}/flow/pipelines/{pipeline}/builds/{run_id}"
+    print(f"Yunxiao run {run_id}: {run_url}", flush=True)
     url = f"{base}/{run_id}"
-    terminal = False
+    outcome = None
     previous = None
     deadline = time.monotonic() + timeout
     def terminate(signum, frame):
@@ -89,26 +90,30 @@ def dispatch(game, *, release_id=None, attempt=None, timeout=85 * 60):
             if status != previous:
                 print(f"Yunxiao run {run_id}: {status}", flush=True)
                 previous = status
-            if status == "SUCCESS":
-                terminal = True
-                return run_id
             if status not in ("RUNNING", "WAITING"):
-                terminal = True
+                outcome = status
+                if status == "SUCCESS":
+                    return run_id
                 raise RuntimeError(f"Yunxiao publication {status}")
             time.sleep(30)
         raise TimeoutError("Yunxiao publication timed out")
     except BaseException:
-        if not terminal:
+        if outcome is None:
             try:
                 stopped = requests.put(url, headers=headers, timeout=30)
                 if not stopped.ok or stopped.json() is not True:
                     raise RuntimeError("stop was not acknowledged")
-                print(f"Stopped Yunxiao run {run_id}", file=sys.stderr, flush=True)
+                outcome = "已请求停止，最终状态待确认"
+                print(f"Requested stop for Yunxiao run {run_id}", file=sys.stderr, flush=True)
             except Exception:
+                outcome = "停止请求未确认"
                 print(f"Could not stop Yunxiao run {run_id}; inspect the pipeline", file=sys.stderr, flush=True)
         raise
     finally:
         signal.signal(signal.SIGTERM, old_handler)
+        if path := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(path, "a", encoding="utf-8") as summary:
+                summary.write(f"云效 {game} [流水线 {pipeline} · #{run_id}]({run_url}) — {outcome}\n")
 
 
 def upload(game, run_id, attempt, output):
@@ -180,8 +185,7 @@ def upload(game, run_id, attempt, output):
         shutil.rmtree(payload)
     workflow = source_workflow(game, run_id, sha, attempt, token)
     result = finalize(plan, receipts, github_workflow=workflow)
-    garbage_collect(game, execute=True)
-    return result
+    return {**result, "cleanup": garbage_collect(game, execute=True)}
 
 
 def main():

@@ -89,7 +89,10 @@ def main():
     print(encode(result).decode(), end="")
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a", encoding="utf-8") as summary:
-            summary.write("```json\n" + json.dumps(result, ensure_ascii=False, indent=2) + "\n```\n")
+            if args.command == "gc" and isinstance(result, dict) and result.get("deferred"):
+                summary.write(f"{args.game} 清理延期。{result['reason']}。\n")
+            else:
+                summary.write("```json\n" + json.dumps(result, ensure_ascii=False, indent=2) + "\n```\n")
     if failed:
         raise SystemExit(1)
 

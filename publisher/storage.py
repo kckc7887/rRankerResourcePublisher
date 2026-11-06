@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 import json
@@ -39,14 +38,12 @@ def file_digest(path):
 
 
 def recoverable_upload_error(error):
-    import paramiko
-
     if isinstance(error, ClientError):
         status = error.response["ResponseMetadata"]["HTTPStatusCode"]
         return status in (404, 408, 409, 429) or status >= 500
     if isinstance(error, (FileNotFoundError, PermissionError)):
         return False
-    return isinstance(error, (BotoCoreError, paramiko.SSHException, OSError, EOFError))
+    return isinstance(error, (BotoCoreError, OSError, EOFError))
 
 
 def safe_path(key):
@@ -106,12 +103,14 @@ def _upload_progress(protocol, key, size):
 
 class Storage:
     def __init__(self, game):
-        self._game = game
         self.bucket = os.environ["S3_BUCKET_NAME"]
         if self.bucket != BUCKETS[game]:
             raise ValueError(f"Wrong bucket for {game}")
+        endpoint = os.environ["S3_ENDPOINT"]
+        if urlsplit(endpoint).scheme != "https":
+            raise ValueError("S3 endpoint must use HTTPS")
         self.client = boto3.client(
-            "s3", endpoint_url=os.environ["S3_ENDPOINT"],
+            "s3", endpoint_url=endpoint,
             aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
             aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
             region_name=os.environ.get("S3_REGION", "us-east-1"),
@@ -173,18 +172,16 @@ class Storage:
             head = self.head(key)
             if (etag and (head is None or head["ETag"] != etag)) or (absent and head is not None):
                 raise ClientError({"Error": {"Code": "PreconditionFailed", "Message": "Publication destination changed"},
-                                   "ResponseMetadata": {"HTTPStatusCode": 412}}, "SFTPPut")
+                                   "ResponseMetadata": {"HTTPStatusCode": 412}}, "PutObject")
         if sha256:
             args["Metadata"] = {"sha256": sha256}
         position = body.tell() if hasattr(body, "tell") else None
         for attempt in range(3):
             try:
-                if self._game == "apk":
-                    return self._s3_put(args)
-                return self._sftp_put(args)
-            except ClientError as error:
-                status = error.response["ResponseMetadata"]["HTTPStatusCode"]
-                if status not in (404, 409, 412, 500, 502, 503, 504):
+                return self._s3_put(args)
+            except (ClientError, BotoCoreError, OSError, EOFError) as error:
+                conflict = isinstance(error, ClientError) and error.response["ResponseMetadata"]["HTTPStatusCode"] == 412
+                if not conflict and not recoverable_upload_error(error):
                     raise
                 head = self.head(key)
                 if head and (absent or head["ETag"] != etag):
@@ -194,7 +191,13 @@ class Storage:
                         body.seek(0, 2)
                         size = body.tell() - position
                         body.seek(position)
-                        expected = sha256 or hashlib.file_digest(body, "sha256").hexdigest()
+                        if sha256:
+                            expected = sha256
+                        else:
+                            checksum = hashlib.sha256()
+                            while chunk := body.read(4 * 1024 * 1024):
+                                checksum.update(chunk)
+                            expected = checksum.hexdigest()
                         body.seek(position)
                     try:
                         verified = self.verify(key, size, expected, head["ETag"])
@@ -203,9 +206,9 @@ class Storage:
                     if (head.get("ContentType") == args["ContentType"] and head.get("CacheControl") == args["CacheControl"]
                             and head.get("Metadata", {}) == args.get("Metadata", {})):
                         return verified
-                if status == 412 or (etag and head is None) or attempt == 2:
+                if conflict or (etag and head is None) or attempt == 2:
                     raise
-                print(f"Retrying object write after HTTP {status}: {key}", file=sys.stderr, flush=True)
+                print(f"Retrying S3 PUT after {type(error).__name__}: {key}", file=sys.stderr, flush=True)
                 time.sleep(2 ** (attempt + 1))
                 if position is not None:
                     body.seek(position)
@@ -234,48 +237,8 @@ class Storage:
                 Config=TransferConfig(multipart_threshold=size + 1, use_threads=False, preferred_transfer_client="classic"),
             )
         print(f"S3 PUT acknowledged: {args['Key']}", file=sys.stderr, flush=True)
-        head = self.head(args["Key"])
-        if head is None:
-            raise ValueError(f"S3 upload is not readable: {args['Key']}")
+        head = self.client.head_object(Bucket=self.bucket, Key=args["Key"])
         return head["ETag"]
-
-    def _sftp_put(self, args):
-        import paramiko
-
-        endpoint = urlsplit(os.environ["SFTP_ENDPOINT"])
-        if endpoint.scheme != "sftp" or not endpoint.hostname:
-            raise ValueError("Invalid SFTP endpoint")
-        key_type, key_data = os.environ["SFTP_HOST_KEY"].split()[:2]
-        host_key = paramiko.PKey.from_type_string(key_type, base64.b64decode(key_data))
-        port = endpoint.port or 22
-        host = endpoint.hostname if port == 22 else f"[{endpoint.hostname}]:{port}"
-        source = args["Body"] if hasattr(args["Body"], "read") else io.BytesIO(args["Body"])
-        position = source.tell()
-        source.seek(0, 2)
-        size = source.tell() - position
-        source.seek(position)
-        print(f"Uploading through SFTP: {args['Key']}", file=sys.stderr, flush=True)
-        with paramiko.SSHClient() as ssh:
-            ssh.get_host_keys().add(host, host_key.get_name(), host_key)
-            ssh.connect(endpoint.hostname, port=port, username=os.environ["S3_ACCESS_KEY_ID"],
-                        password=os.environ["S3_SECRET_ACCESS_KEY"], allow_agent=False, look_for_keys=False,
-                        timeout=30, banner_timeout=30, auth_timeout=30)
-            with ssh.open_sftp() as sftp:
-                sftp.get_channel().settimeout(120)
-                progress = _upload_progress("SFTP", args["Key"], size)
-                sftp.putfo(source, f"/{self.bucket}/{args['Key']}", file_size=size,
-                           callback=lambda sent, total: progress(sent), confirm=False)
-        print(f"SFTP transfer acknowledged: {args['Key']}; updating S3 metadata", file=sys.stderr, flush=True)
-        head = self.head(args["Key"])
-        if head is None:
-            raise ValueError(f"SFTP upload is not readable: {args['Key']}")
-        etag = self.client.copy_object(
-            Bucket=self.bucket, Key=args["Key"], CopySource={"Bucket": self.bucket, "Key": args["Key"]},
-            CopySourceIfMatch=head["ETag"], MetadataDirective="REPLACE", Metadata=args.get("Metadata", {}),
-            ContentType=args["ContentType"], CacheControl=args["CacheControl"],
-        )["CopyObjectResult"]["ETag"]
-        print(f"S3 metadata updated: {args['Key']}", file=sys.stderr, flush=True)
-        return etag
 
     def copy(self, source, etag, target, sha256, content_type, *, immutable=True):
         return self.client.copy_object(

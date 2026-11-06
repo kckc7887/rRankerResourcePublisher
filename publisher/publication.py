@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
+
 from .storage import Storage, digest, encode, file_digest, owned_key, parallel
 
 
@@ -223,8 +225,7 @@ def finalize(plan, receipts, *, github_workflow=None):
     return {"unchanged": False, "pointer": pointer}
 
 
-def garbage_collect(game, *, execute=False):
-    storage = Storage(game)
+def _cleanup_candidates(storage, game):
     release = read_release(storage, game)
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     retained = set()
@@ -270,10 +271,21 @@ def garbage_collect(game, *, execute=False):
             continue
         if key not in retained | referenced and row["LastModified"] < cutoff:
             candidates.append({"key": key, "etag": row["ETag"], "size": row["Size"]})
+    return release["etag"], candidates
+
+
+def garbage_collect(game, *, execute=False):
+    storage = Storage(game)
+    try:
+        etag, candidates = _cleanup_candidates(storage, game)
+    except (ConnectTimeoutError, ReadTimeoutError):
+        if not execute:
+            raise
+        return {"game": game, "deferred": True, "reason": "扫描 S3 资源时超时，将在下次运行时重新检查"}
     if execute:
         for row in candidates:
             head = storage.head(f"{game}/latest.json")
-            if head["ETag"] != release["etag"]:
+            if not head or head["ETag"] != etag:
                 raise ValueError("Publication changed during cleanup")
             storage.delete(row["key"], row["etag"])
     return candidates
